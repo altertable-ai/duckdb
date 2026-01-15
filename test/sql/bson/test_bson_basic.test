@@ -1,0 +1,61 @@
+# name: test/sql/bson/test_bson_basic.test
+# description: Test BSON extension basic functionality
+# group: [bson]
+
+require bson
+
+# Test BSON type registration - empty document
+statement ok
+SELECT '\x05\x00\x00\x00\x00'::BLOB::BSON;
+
+# Test BSON validation - valid empty document
+query I
+SELECT bson_valid('\x05\x00\x00\x00\x00'::BLOB::BSON);
+----
+true
+
+# Note: bson_valid only works on already-cast BSON values
+# Invalid BLOBs will fail during the cast, not during validation
+# So we test validation with valid BSON documents only
+
+# Test BSON exists with empty document
+query I
+SELECT bson_exists('\x05\x00\x00\x00\x00'::BLOB::BSON, '$');
+----
+true
+
+# Test BSON type detection - root is always document
+query I
+SELECT bson_type('\x05\x00\x00\x00\x00'::BLOB::BSON, '$');
+----
+document
+
+# Test BSON string extraction
+# BSON document with string: {"name": "test"}
+# Document structure: 
+# - 4 bytes: length (20 = 0x14)
+# - 1 byte: type 0x02 (string)
+# - cstring: "name\0"
+# - 4 bytes: string length (5 = 0x05, includes null terminator)
+# - string: "test\0"
+# - 1 byte: document terminator 0x00
+query I
+SELECT bson_extract_string('\x14\x00\x00\x00\x02name\x00\x05\x00\x00\x00test\x00\x00'::BLOB::BSON, '$.name');
+----
+test
+
+# Test cast from BLOB to BSON with validation - should succeed
+statement ok
+SELECT '\x05\x00\x00\x00\x00'::BLOB::BSON;
+
+# Test cast from BLOB to BSON with invalid data - should fail with error
+statement error
+SELECT '\x04\x00\x00\x00\x00'::BLOB::BSON;
+----
+Invalid BSON document
+
+# Test cast from BSON to BLOB (free reinterpret cast)
+query I
+SELECT '\x05\x00\x00\x00\x00'::BLOB::BSON::BLOB = '\x05\x00\x00\x00\x00'::BLOB;
+----
+true

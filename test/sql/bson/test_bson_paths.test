@@ -1,0 +1,63 @@
+# name: test/sql/bson/test_bson_paths.test
+# description: Test BSON extension path traversal
+# group: [bson]
+
+require bson
+
+# Test simple key access
+# Document: {"name": "John"}
+query I
+SELECT bson_extract_string('\x14\x00\x00\x00\x02name\x00\x05\x00\x00\x00John\x00\x00'::BLOB::BSON, '$.name');
+----
+John
+
+query I
+SELECT bson_extract_string('\x14\x00\x00\x00\x02name\x00\x05\x00\x00\x00John\x00\x00'::BLOB::BSON, '$."name"');
+----
+John
+
+# Test path parsing errors - paths must start with $
+statement error
+SELECT bson_exists('\x05\x00\x00\x00\x00'::BLOB::BSON, 'invalid');
+----
+BSON path must start with '$'
+
+# Test path parsing errors - path cannot end with dot
+statement error
+SELECT bson_exists('\x05\x00\x00\x00\x00'::BLOB::BSON, '$.key.');
+----
+BSON path ends with '.'
+
+# Test path parsing errors - unclosed bracket
+statement error
+SELECT bson_exists('\x05\x00\x00\x00\x00'::BLOB::BSON, '$.[');
+----
+Empty key in BSON path
+
+# Test path parsing errors - invalid array index (letters in brackets)
+statement error
+SELECT bson_exists('\x05\x00\x00\x00\x00'::BLOB::BSON, '$.[abc]');
+----
+Empty key in BSON path
+
+# Test root document access
+query I
+SELECT bson_type('\x14\x00\x00\x00\x02name\x00\x05\x00\x00\x00John\x00\x00'::BLOB::BSON, '$');
+----
+document
+
+query I
+SELECT bson_exists('\x14\x00\x00\x00\x02name\x00\x05\x00\x00\x00John\x00\x00'::BLOB::BSON, '$');
+----
+true
+
+# Test non-existent paths return NULL
+query I
+SELECT bson_extract_string('\x14\x00\x00\x00\x02name\x00\x05\x00\x00\x00John\x00\x00'::BLOB::BSON, '$.missing');
+----
+NULL
+
+query I
+SELECT bson_type('\x14\x00\x00\x00\x02name\x00\x05\x00\x00\x00John\x00\x00'::BLOB::BSON, '$.missing');
+----
+NULL

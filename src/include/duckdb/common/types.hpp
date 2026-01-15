@@ -458,6 +458,10 @@ public:
 	static constexpr auto JSON_TYPE_NAME = "JSON";
 	DUCKDB_API static LogicalType JSON(); // NOLINT
 	DUCKDB_API bool IsJSONType() const;
+	//! The BSON type lives in the BSON extension, but we need to define this here for special handling
+	static constexpr auto BSON_TYPE_NAME = "BSON";
+	DUCKDB_API static LogicalType BSON(); // NOLINT
+	DUCKDB_API bool IsBSONType() const;
 };
 
 struct DecimalType {

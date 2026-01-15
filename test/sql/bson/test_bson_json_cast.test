@@ -1,0 +1,76 @@
+# name: test/sql/bson/test_bson_json_cast.test
+# description: Test JSON to BSON casting
+# group: [bson]
+
+require bson
+
+require json
+
+# Test simple object conversion
+query I
+SELECT bson_valid('{"name": "test"}'::BSON);
+----
+true
+
+# Test string extraction from JSON-created BSON
+query I
+SELECT bson_extract_string('{"name": "John", "city": "NYC"}'::BSON, '$.name');
+----
+John
+
+query I
+SELECT bson_extract_string('{"name": "John", "city": "NYC"}'::BSON, '$.city');
+----
+NYC
+
+# Test integer field
+query I
+SELECT bson_type('{"count": 42}'::BSON, '$.count');
+----
+int64
+
+query I
+SELECT bson_exists('{"count": 42}'::BSON, '$.count');
+----
+true
+
+# Test boolean field
+query I
+SELECT bson_type('{"flag": true}'::BSON, '$.flag');
+----
+boolean
+
+# Test with complex nested structure
+query I
+SELECT bson_exists('{"user": {"name": "Alice", "age": 25}, "active": true}'::BSON, '$.user');
+----
+true
+
+query I
+SELECT bson_type('{"user": {"name": "Alice", "age": 25}, "active": true}'::BSON, '$.user');
+----
+document
+
+# Test array
+query I
+SELECT bson_type('{"items": [1, 2, 3]}'::BSON, '$.items');
+----
+array
+
+# Test empty object
+query I
+SELECT bson_valid('{}'::BSON);
+----
+true
+
+# Test invalid JSON should fail
+statement error
+SELECT '{invalid json}'::BSON;
+----
+Invalid JSON
+
+# Test non-object/array JSON should fail
+statement error
+SELECT '"just a string"'::BSON;
+----
+JSON root must be object or array

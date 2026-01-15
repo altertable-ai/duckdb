@@ -1,0 +1,115 @@
+/**
+ * BSON vs JSON Extraction Benchmark
+ * 
+ * This benchmark compares the performance of field extraction between
+ * BSON and JSON formats on the same logical data.
+ * 
+ * Expected result: BSON should be faster for repeated extractions as it
+ * avoids UTF-8 validation and escape sequence parsing.
+ */
+
+#include "benchmark_runner.hpp"
+#include "duckdb/common/types/blob.hpp"
+#include "duckdb/main/connection.hpp"
+
+using namespace duckdb;
+
+#define BSON_BENCHMARK_GROUP "bson"
+
+// Helper to create BSON document: {"name": "value", "count": 42}
+string CreateBSONDocument() {
+	// Manually construct BSON bytes
+	// Total: 32 bytes
+	string bson;
+	
+	// Document length (32 bytes)
+	bson.push_back(0x20);
+	bson.push_back(0x00);
+	bson.push_back(0x00);
+	bson.push_back(0x00);
+	
+	// Field 1: string "name" = "value"
+	bson.push_back(0x02); // type: string
+	bson.append("name");
+	bson.push_back(0x00); // null terminator
+	bson.push_back(0x06); // string length (including null)
+	bson.push_back(0x00);
+	bson.push_back(0x00);
+	bson.push_back(0x00);
+	bson.append("value");
+	bson.push_back(0x00); // null terminator
+	
+	// Field 2: int32 "count" = 42
+	bson.push_back(0x10); // type: int32
+	bson.append("count");
+	bson.push_back(0x00); // null terminator
+	bson.push_back(0x2A); // 42
+	bson.push_back(0x00);
+	bson.push_back(0x00);
+	bson.push_back(0x00);
+	
+	// Document terminator
+	bson.push_back(0x00);
+	
+	return bson;
+}
+
+DUCKDB_BENCHMARK(BSONExtractString, BSON_BENCHMARK_GROUP)
+void Load(DuckDBBenchmarkState *state) override {
+	state->conn->Query("LOAD bson");
+	state->conn->Query("CREATE TABLE bson_data (id INTEGER, data BSON)");
+	
+	auto bson_doc = CreateBSONDocument();
+	auto bson_hex = Blob::ToBlob(string_t(bson_doc));
+	
+	// Insert 10000 rows
+	for (idx_t i = 0; i < 10000; i++) {
+		state->conn->Query("INSERT INTO bson_data VALUES (" + to_string(i) + ", '" + bson_hex + "'::BLOB::BSON)");
+	}
+}
+
+string GetQuery() override {
+	return "SELECT bson_extract_string(data, '$.name') FROM bson_data";
+}
+
+string VerifyResult(QueryResult *result) override {
+	if (!result->success) {
+		return result->error;
+	}
+	return string();
+}
+
+string BenchmarkInfo() override {
+	return "Extract string field from BSON documents";
+}
+FINISH_BENCHMARK(BSONExtractString)
+
+DUCKDB_BENCHMARK(JSONExtractString, BSON_BENCHMARK_GROUP)
+void Load(DuckDBBenchmarkState *state) override {
+	state->conn->Query("LOAD json");
+	state->conn->Query("CREATE TABLE json_data (id INTEGER, data JSON)");
+	
+	// Equivalent JSON: {"name": "value", "count": 42}
+	string json_doc = R"({"name":"value","count":42})";
+	
+	// Insert 10000 rows
+	for (idx_t i = 0; i < 10000; i++) {
+		state->conn->Query("INSERT INTO json_data VALUES (" + to_string(i) + ", '" + json_doc + "')");
+	}
+}
+
+string GetQuery() override {
+	return "SELECT json_extract_string(data, '$.name') FROM json_data";
+}
+
+string VerifyResult(QueryResult *result) override {
+	if (!result->success) {
+		return result->error;
+	}
+	return string();
+}
+
+string BenchmarkInfo() override {
+	return "Extract string field from JSON documents (baseline comparison)";
+}
+FINISH_BENCHMARK(JSONExtractString)

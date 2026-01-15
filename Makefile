@@ -146,6 +146,9 @@ endif
 ifeq (${BUILD_JSON}, 1)
 	BUILD_EXTENSIONS:=${BUILD_EXTENSIONS};json
 endif
+ifeq (${BUILD_BSON}, 1)
+	BUILD_EXTENSIONS:=${BUILD_EXTENSIONS};bson
+endif
 ifeq (${BUILD_JEMALLOC}, 1)
 	BUILD_EXTENSIONS:=${BUILD_EXTENSIONS};jemalloc
 endif

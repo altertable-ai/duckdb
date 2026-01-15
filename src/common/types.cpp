@@ -1857,6 +1857,19 @@ bool LogicalType::IsJSONType() const {
 }
 
 //===--------------------------------------------------------------------===//
+// BSON Type
+//===--------------------------------------------------------------------===//
+LogicalType LogicalType::BSON() {
+	auto bson_type = LogicalType(LogicalTypeId::BLOB);
+	bson_type.SetAlias(BSON_TYPE_NAME);
+	return bson_type;
+}
+
+bool LogicalType::IsBSONType() const {
+	return id() == LogicalTypeId::BLOB && HasAlias() && GetAlias() == BSON_TYPE_NAME;
+}
+
+//===--------------------------------------------------------------------===//
 // Array Type
 //===--------------------------------------------------------------------===//
 

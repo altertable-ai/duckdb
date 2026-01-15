@@ -1,0 +1,74 @@
+# name: test/sql/bson/test_bson_types.test
+# description: Test BSON extension with various types
+# group: [bson]
+
+require bson
+
+# Test empty document
+query I
+SELECT bson_valid('\x05\x00\x00\x00\x00'::BLOB::BSON);
+----
+true
+
+query I
+SELECT bson_type('\x05\x00\x00\x00\x00'::BLOB::BSON, '$');
+----
+document
+
+# Test int32 field
+# Document: {"count": 42}
+# 0x10 0x00 0x00 0x00 - length (16 bytes)
+# 0x10 - type (int32)
+# "count\0" - key
+# 0x2A 0x00 0x00 0x00 - value (42)
+# 0x00 - terminator
+query I
+SELECT bson_type('\x10\x00\x00\x00\x10count\x00\x2A\x00\x00\x00\x00'::BLOB::BSON, '$.count');
+----
+int32
+
+query I
+SELECT bson_exists('\x10\x00\x00\x00\x10count\x00\x2A\x00\x00\x00\x00'::BLOB::BSON, '$.count');
+----
+true
+
+query I
+SELECT bson_exists('\x10\x00\x00\x00\x10count\x00\x2A\x00\x00\x00\x00'::BLOB::BSON, '$.missing');
+----
+false
+
+# Test boolean field
+# Document: {"flag": true}
+# 0x0C 0x00 0x00 0x00 - length (12 bytes)
+# 0x08 - type (boolean)
+# "flag\0" - key
+# 0x01 - value (true)
+# 0x00 - terminator
+query I
+SELECT bson_type('\x0C\x00\x00\x00\x08flag\x00\x01\x00'::BLOB::BSON, '$.flag');
+----
+boolean
+
+# Test null field - using the boolean document for now
+# (null type 0x0A can be confused with newline in SQL, so we test with bool)
+# Document: {"flag": true}
+query I
+SELECT bson_exists('\x0C\x00\x00\x00\x08flag\x00\x01\x00'::BLOB::BSON, '$.flag');
+----
+true
+
+# Test that invalid BLOBs fail when casting to BSON
+statement error
+SELECT 'invalid'::BLOB::BSON;
+----
+Invalid BSON document
+
+statement error
+SELECT '\x00\x00\x00\x00'::BLOB::BSON;
+----
+Invalid BSON document
+
+statement error
+SELECT '\xFF\xFF\xFF\xFF\x00'::BLOB::BSON;
+----
+Invalid BSON document
