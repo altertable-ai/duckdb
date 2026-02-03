@@ -93,9 +93,10 @@ BoundStatement Binder::BindShowQuery(ShowRef &ref) {
 	auto plan = child_binder->Bind(*ref.query);
 
 	// construct a column data collection with the result
-	vector<string> return_names = {"column_name", "column_type", "null", "key", "default", "extra"};
+	vector<string> return_names = {"column_name", "column_type", "null", "key", "default", "extra", "comment"};
 	vector<LogicalType> return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                                    LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	                                    LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                                    LogicalType::VARCHAR};
 	DataChunk output;
 	output.Initialize(Allocator::Get(context), return_types);
 
@@ -130,6 +131,8 @@ BoundStatement Binder::BindShowQuery(ShowRef &ref) {
 			output.SetValue(4, row_index, Value());
 			// "extra", TypeId::VARCHAR
 			output.SetValue(5, row_index, Value());
+			// "comment", TypeId::VARCHAR - NULL for computed expressions
+			output.SetValue(6, row_index, Value());
 		}
 
 		output.SetCardinality(output.size() + 1);

@@ -1,0 +1,127 @@
+# name: test/sql/show_select/show_select_comments.test
+# description: Test DESCRIBE with column comments
+# group: [show_select]
+
+statement ok
+CREATE TABLE test_comments(id INTEGER PRIMARY KEY, name VARCHAR, value INTEGER)
+
+statement ok
+COMMENT ON COLUMN test_comments.id IS 'very gezellige id'
+
+statement ok
+COMMENT ON COLUMN test_comments.name IS 'very gezellige name'
+
+# column_name | column_type | null | key | default | extra | comment
+query TTTTTTT
+DESCRIBE test_comments
+----
+id	INTEGER	NO	PRI	NULL	NULL	very gezellige id
+name	VARCHAR	YES	NULL	NULL	NULL	very gezellige name
+value	INTEGER	YES	NULL	NULL	NULL	NULL
+
+query II
+SELECT column_name, comment FROM (DESCRIBE SELECT id, name FROM test_comments)
+----
+id	very gezellige id
+name	very gezellige name
+
+# alias
+query II
+SELECT column_name, comment FROM (DESCRIBE SELECT id AS identifier FROM test_comments)
+----
+identifier	very gezellige id
+
+# computed expression
+query II
+SELECT column_name, comment FROM (DESCRIBE SELECT id + 1 AS computed FROM test_comments)
+----
+computed	NULL
+
+# no comments
+statement ok
+CREATE TABLE no_comments(col1 INT, col2 INT)
+
+query II
+SELECT column_name, comment FROM (DESCRIBE no_comments)
+----
+col1	NULL
+col2	NULL
+
+# view
+statement ok
+CREATE VIEW test_view AS SELECT id, name FROM test_comments
+
+statement ok
+COMMENT ON COLUMN test_view.id IS 'very gezellige view id'
+
+# DESCRIBE traces to base table
+query II
+SELECT column_name, comment FROM (DESCRIBE test_view)
+----
+id	very gezellige id
+name	very gezellige name
+
+# pragma_show returns view comment
+query II
+SELECT column_name, comment FROM pragma_show('test_view')
+----
+id	very gezellige view id
+name	NULL
+
+# join
+statement ok
+CREATE TABLE other_table(other_id INTEGER, other_name VARCHAR)
+
+statement ok
+COMMENT ON COLUMN other_table.other_id IS 'very gezellige other id'
+
+query II
+SELECT column_name, comment FROM (DESCRIBE SELECT t1.id, t2.other_id FROM test_comments t1, other_table t2)
+----
+id	very gezellige id
+other_id	very gezellige other id
+
+# empty string
+statement ok
+CREATE TABLE empty_comment_table(col1 INT)
+
+statement ok
+COMMENT ON COLUMN empty_comment_table.col1 IS ''
+
+query II
+SELECT column_name, comment FROM (DESCRIBE empty_comment_table)
+----
+col1	(empty)
+
+# remove comment
+statement ok
+COMMENT ON COLUMN test_comments.name IS NULL
+
+query II
+SELECT column_name, comment FROM (DESCRIBE test_comments) WHERE column_name = 'name'
+----
+name	NULL
+
+# union
+statement ok
+CREATE TABLE union_table1(col INT)
+
+statement ok
+CREATE TABLE union_table2(col INT)
+
+statement ok
+COMMENT ON COLUMN union_table1.col IS 'very gezellige column 1'
+
+statement ok
+COMMENT ON COLUMN union_table2.col IS 'very gezellige column 2'
+
+query II
+SELECT column_name, comment FROM (DESCRIBE SELECT col FROM union_table1 UNION ALL SELECT col FROM union_table2)
+----
+col	NULL
+
+# subquery
+query II
+SELECT column_name, comment FROM (DESCRIBE SELECT * FROM (SELECT id FROM test_comments) sub)
+----
+id	very gezellige id

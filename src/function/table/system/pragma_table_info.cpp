@@ -122,6 +122,9 @@ struct PragmaShowHelper {
 
 		names.emplace_back("extra");
 		return_types.emplace_back(LogicalType::VARCHAR);
+
+		names.emplace_back("comment");
+		return_types.emplace_back(LogicalType::VARCHAR);
 	}
 
 	static void GetTableColumns(const ColumnDefinition &column, ColumnConstraintInfo constraint_info, DataChunk &output,
@@ -142,9 +145,12 @@ struct PragmaShowHelper {
 		output.SetValue(4, index, DefaultValue(column));
 		// "extra", VARCHAR
 		output.SetValue(5, index, Value());
+		// "comment", VARCHAR
+		output.SetValue(6, index, column.Comment());
 	}
 
-	static void GetViewColumns(idx_t i, const string &name, const LogicalType &type, DataChunk &output, idx_t index) {
+	static void GetViewColumns(ViewCatalogEntry &view, idx_t i, const string &name, const LogicalType &type,
+	                           DataChunk &output, idx_t index) {
 		// "column_name", PhysicalType::VARCHAR
 		output.SetValue(0, index, Value(name));
 		// "column_type", PhysicalType::VARCHAR
@@ -157,6 +163,8 @@ struct PragmaShowHelper {
 		output.SetValue(4, index, Value());
 		// "extra", VARCHAR
 		output.SetValue(5, index, Value());
+		// "comment", VARCHAR
+		output.SetValue(6, index, view.GetColumnComment(i));
 	}
 };
 
@@ -271,7 +279,7 @@ static void PragmaTableInfoView(ClientContext &context, PragmaTableOperatorData 
 		if (is_table_info) {
 			PragmaTableInfoHelper::GetViewColumns(i, name, type, output, index);
 		} else {
-			PragmaShowHelper::GetViewColumns(i, name, type, output, index);
+			PragmaShowHelper::GetViewColumns(view, i, name, type, output, index);
 		}
 	}
 	data.offset = next;

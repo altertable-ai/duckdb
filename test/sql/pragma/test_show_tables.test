@@ -31,10 +31,10 @@ CREATE INDEX not_a_table ON tbl(i);
 
 # We test that right table is described (from s1 schema)
 # column_name | column_type | null | key | default | extra
-query TTTITI
+query TTTITIT
 DESCRIBE s1.tbl;
 ----
-i	INTEGER	YES	UNI	NULL	NULL
+i	INTEGER	YES	UNI	NULL	NULL	NULL
 
 # We test that the index can't be described
 statement error
@@ -43,26 +43,26 @@ DESCRIBE my_index;
 
 # We test that right table is described (from main schema)
 # column_name | column_type | null | key | default | extra
-query TTTITI
+query TTTITIT
 DESCRIBE tbl;
 ----
-i	INTEGER	NO	PRI	NULL	NULL
+i	INTEGER	NO	PRI	NULL	NULL	NULL
 
 # Validate PRI and UNI constrains
 # column_name | column_type | null | key | default | extra
-query TTTITI
+query TTTITIT
 DESCRIBE t2
 ----
-id	INTEGER	NO	PRI	NULL	NULL
-j	VARCHAR	YES	UNI	NULL	NULL
+id	INTEGER	NO	PRI	NULL	NULL	NULL
+j	VARCHAR	YES	UNI	NULL	NULL	NULL
 
 # equivalent to DESCRIBE t2
 # column_name | column_type | null | key | default | extra
-query TTTITI
+query TTTITIT
 PRAGMA "SHOW"('t2')
 ----
-id	INTEGER	NO	PRI	NULL	NULL
-j	VARCHAR	YES	UNI	NULL	NULL
+id	INTEGER	NO	PRI	NULL	NULL	NULL
+j	VARCHAR	YES	UNI	NULL	NULL	NULL
 
 # SHOW and DESCRIBE are aliases
 query T
@@ -94,32 +94,32 @@ tbl
 v1
 
 # column_name | column_type | null | key | default | extra
-query TTTITI
+query TTTITIT
 SHOW integers
 ----
-i	INTEGER	YES	NULL	NULL	NULL
-j	INTEGER	YES	NULL	NULL	NULL
+i	INTEGER	YES	NULL	NULL	NULL	NULL
+j	INTEGER	YES	NULL	NULL	NULL	NULL
 
 # column_name | column_type | null | key | default | extra
-query TTTITI
+query TTTITIT
 SHOW "select";
 ----
-i	INTEGER	YES	NULL	NULL	NULL
+i	INTEGER	YES	NULL	NULL	NULL	NULL
 
 # equivalent to PRAGMA SHOW('integers')
 # column_name | column_type | null | key | default | extra
-query TTTITI
+query TTTITIT
 PRAGMA "SHOW"('integers')
 ----
-i	INTEGER	YES	NULL	NULL	NULL
-j	INTEGER	YES	NULL	NULL	NULL
+i	INTEGER	YES	NULL	NULL	NULL	NULL
+j	INTEGER	YES	NULL	NULL	NULL	NULL
 
 # we can also describe views
 # column_name | column_type | null | key | default | extra
-query TTTITI
+query TTTITIT
 DESCRIBE v1
 ----
-k	DATE	YES	NULL	NULL	NULL
+k	DATE	YES	NULL	NULL	NULL	NULL
 
 # view over show tables
 statement ok

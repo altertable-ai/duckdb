@@ -5,8 +5,8 @@
 statement ok
 PRAGMA enable_verification
 
-query IIIIII
+query IIIIIII
 DESCRIBE FROM read_csv('{DATA_DIR}/csv/18579/*.csv', union_by_name = true);
 ----
-billingAccountName	VARCHAR	YES	NULL	NULL	NULL
-partnerName	VARCHAR	YES	NULL	NULL	NULL
+billingAccountName	VARCHAR	YES	NULL	NULL	NULL	NULL
+partnerName	VARCHAR	YES	NULL	NULL	NULL	NULL
