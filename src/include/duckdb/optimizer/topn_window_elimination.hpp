@@ -49,6 +49,12 @@ private:
 	                                                     const TopNWindowEliminationParameters &params,
 	                                                     const map<idx_t, idx_t> &group_idxs) const;
 
+	unique_ptr<LogicalOperator> CreateSortBasedTopNOperator(LogicalWindow &window,
+	                                                        const TopNWindowEliminationParameters &params) const;
+	unique_ptr<LogicalOperator>
+	CreateSortBasedProjectionOperator(unique_ptr<LogicalOperator> op, const TopNWindowEliminationParameters &params,
+	                                  const vector<ColumnBinding> &bindings, idx_t window_idx) const;
+
 	vector<unique_ptr<Expression>> GenerateAggregatePayload(const vector<ColumnBinding> &bindings,
 	                                                        const LogicalWindow &window, map<idx_t, idx_t> &group_idxs);
 	vector<ColumnBinding> TraverseProjectionBindings(const std::vector<ColumnBinding> &old_bindings,

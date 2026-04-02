@@ -144,6 +144,7 @@ bool QueryProfiler::OperatorRequiresProfiling(const PhysicalOperatorType op_type
 	case PhysicalOperatorType::LIMIT:
 	case PhysicalOperatorType::LIMIT_PERCENT:
 	case PhysicalOperatorType::STREAMING_LIMIT:
+	case PhysicalOperatorType::STREAMING_TOP_N_PER_GROUP:
 	case PhysicalOperatorType::TOP_N:
 	case PhysicalOperatorType::WINDOW:
 	case PhysicalOperatorType::UNNEST:

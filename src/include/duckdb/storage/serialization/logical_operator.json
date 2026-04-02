@@ -222,6 +222,39 @@
     ]
   },
   {
+    "class": "LogicalTopNPerGroup",
+    "base": "LogicalOperator",
+    "enum": "LOGICAL_TOP_N_PER_GROUP",
+    "members": [
+      {
+        "id": 200,
+        "name": "table_index",
+        "type": "idx_t"
+      },
+      {
+        "id": 201,
+        "name": "groups",
+        "type": "vector<Expression*>"
+      },
+      {
+        "id": 202,
+        "name": "limit",
+        "type": "idx_t"
+      },
+      {
+        "id": 203,
+        "name": "include_row_number",
+        "type": "bool"
+      }
+    ],
+    "constructor": [
+      "table_index",
+      "groups",
+      "limit",
+      "include_row_number"
+    ]
+  },
+  {
     "class": "LogicalDistinct",
     "base": "LogicalOperator",
     "enum": "LOGICAL_DISTINCT",

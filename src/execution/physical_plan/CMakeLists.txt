@@ -39,6 +39,7 @@ add_library_unity(
   plan_sample.cpp
   plan_simple.cpp
   plan_top_n.cpp
+  plan_top_n_per_group.cpp
   plan_update.cpp
   plan_window.cpp
   plan_vacuum.cpp

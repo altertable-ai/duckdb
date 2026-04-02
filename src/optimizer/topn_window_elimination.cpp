@@ -12,21 +12,76 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_top_n_per_group.hpp"
 #include "duckdb/planner/operator/logical_unnest.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
-#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_unnest_expression.hpp"
 #include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/storage/statistics/base_statistics.hpp"
 
 namespace duckdb {
 
 namespace {
+
+bool ContainsDelimOperator(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_DELIM_GET || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		return true;
+	}
+	for (const auto &child : op.children) {
+		if (ContainsDelimOperator(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! Prefer hash aggregate + join when partition cardinality is well below row count; otherwise sort + streaming.
+bool ShouldUseHashBasedTopNPath(const LogicalWindow &window,
+                                optional_ptr<column_binding_map_t<unique_ptr<BaseStatistics>>> stats,
+                                idx_t estimated_cardinality) {
+	if (!window.children.empty() && ContainsDelimOperator(*window.children[0])) {
+		return true;
+	}
+	if (estimated_cardinality == 0) {
+		return true;
+	}
+	auto &window_expr = window.expressions[0]->Cast<BoundWindowExpression>();
+	if (window_expr.partitions.empty()) {
+		return true;
+	}
+	if (!stats) {
+		return false;
+	}
+	double ndv_est = 1.0;
+	for (auto &part : window_expr.partitions) {
+		if (part->type != ExpressionType::BOUND_COLUMN_REF) {
+			return false;
+		}
+		auto &colref = part->Cast<BoundColumnRefExpression>();
+		auto it = stats->find(colref.binding);
+		if (it == stats->end() || !it->second) {
+			return false;
+		}
+		const auto dc = it->second->GetDistinctCount();
+		if (dc == 0) {
+			return false;
+		}
+		ndv_est *= static_cast<double>(dc);
+		if (ndv_est > static_cast<double>(estimated_cardinality)) {
+			ndv_est = static_cast<double>(estimated_cardinality);
+		}
+	}
+	return ndv_est < static_cast<double>(estimated_cardinality) * 0.5;
+}
+
 
 idx_t GetGroupIdx(const unique_ptr<LogicalOperator> &op) {
 	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
@@ -198,8 +253,14 @@ unique_ptr<LogicalOperator> TopNWindowElimination::OptimizeInternal(unique_ptr<L
 	auto aggregate_payload = GenerateAggregatePayload(new_bindings, window, group_projection_idxs);
 	auto params = ExtractOptimizerParameters(window, filter, new_bindings, aggregate_payload);
 
+	// Optimize window children
+	window.children[0] = Optimize(std::move(window.children[0]));
+
+	const bool use_hash_path =
+	    ShouldUseHashBasedTopNPath(window, stats, window.estimated_cardinality);
+
 	unique_ptr<LogicalOperator> late_mat_lhs = nullptr;
-	if (params.payload_type == TopNPayloadType::STRUCT_PACK) {
+	if (use_hash_path && params.payload_type == TopNPayloadType::STRUCT_PACK) {
 		// Try circumventing struct-packing with late materialization
 		late_mat_lhs = TryPrepareLateMaterialization(window, aggregate_payload);
 		if (late_mat_lhs && aggregate_payload.size() == 1) {
@@ -207,17 +268,19 @@ unique_ptr<LogicalOperator> TopNWindowElimination::OptimizeInternal(unique_ptr<L
 		}
 	}
 
-	// Optimize window children
-	window.children[0] = Optimize(std::move(window.children[0]));
+	if (use_hash_path) {
+		op = CreateAggregateOperator(window, std::move(aggregate_payload), params);
+		op = TryCreateUnnestOperator(std::move(op), params);
+		op = CreateProjectionOperator(std::move(op), params, group_projection_idxs);
 
-	op = CreateAggregateOperator(window, std::move(aggregate_payload), params);
-	op = TryCreateUnnestOperator(std::move(op), params);
-	op = CreateProjectionOperator(std::move(op), params, group_projection_idxs);
+		D_ASSERT(op->type != LogicalOperatorType::LOGICAL_UNNEST);
 
-	D_ASSERT(op->type != LogicalOperatorType::LOGICAL_UNNEST);
-
-	if (late_mat_lhs) {
-		op = ConstructJoin(std::move(late_mat_lhs), std::move(op), group_projection_idxs.size(), params);
+		if (late_mat_lhs) {
+			op = ConstructJoin(std::move(late_mat_lhs), std::move(op), group_projection_idxs.size(), params);
+		}
+	} else {
+		op = CreateSortBasedTopNOperator(window, params);
+		op = CreateSortBasedProjectionOperator(std::move(op), params, new_bindings, window_idx);
 	}
 
 	UpdateTopmostBindings(window_idx, op, group_projection_idxs, topmost_bindings, new_bindings, replacer);
@@ -461,6 +524,73 @@ TopNWindowElimination::CreateProjectionOperator(unique_ptr<LogicalOperator> op,
 	return unique_ptr<LogicalOperator>(std::move(logical_projection));
 }
 
+unique_ptr<LogicalOperator>
+TopNWindowElimination::CreateSortBasedTopNOperator(LogicalWindow &window,
+                                                 const TopNWindowEliminationParameters &params) const {
+	auto &window_expr = window.expressions[0]->Cast<BoundWindowExpression>();
+	D_ASSERT(window_expr.orders.size() == 1);
+
+	vector<BoundOrderByNode> orders;
+	for (auto &part : window_expr.partitions) {
+		orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, part->Copy());
+	}
+	const auto &ob = window_expr.orders[0];
+	orders.emplace_back(ob.type, ob.null_order, ob.expression->Copy());
+
+	auto logical_order = make_uniq<LogicalOrder>(std::move(orders));
+	logical_order->children.push_back(std::move(window.children[0]));
+	logical_order->ResolveOperatorTypes();
+
+	vector<unique_ptr<Expression>> group_exprs;
+	group_exprs.reserve(window_expr.partitions.size());
+	for (auto &part : window_expr.partitions) {
+		group_exprs.push_back(part->Copy());
+	}
+
+	const auto limit = UnsafeNumericCast<idx_t>(params.limit);
+	auto topn = make_uniq<LogicalTopNPerGroup>(optimizer.binder.GenerateTableIndex(), std::move(group_exprs), limit,
+	                                           params.include_row_number);
+	topn->children.push_back(std::move(logical_order));
+	topn->ResolveOperatorTypes();
+	return topn;
+}
+
+unique_ptr<LogicalOperator> TopNWindowElimination::CreateSortBasedProjectionOperator(
+    unique_ptr<LogicalOperator> op, const TopNWindowEliminationParameters &params,
+    const vector<ColumnBinding> &bindings, idx_t window_idx) const {
+	const auto op_bindings = op->GetColumnBindings();
+	column_binding_map_t<idx_t> binding_to_index;
+	for (idx_t i = 0; i < op_bindings.size(); i++) {
+		binding_to_index[op_bindings[i]] = i;
+	}
+
+	vector<unique_ptr<Expression>> proj_exprs;
+	for (const auto &binding : bindings) {
+		if (binding.table_index == window_idx) {
+			if (!params.include_row_number) {
+				continue;
+			}
+			auto &topn = op->Cast<LogicalTopNPerGroup>();
+			proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+			    "row_number", LogicalType::BIGINT, ColumnBinding(topn.table_index, 0)));
+			continue;
+		}
+		const auto entry = binding_to_index.find(binding);
+		if (entry == binding_to_index.end()) {
+			continue;
+		}
+		const auto source_idx = entry->second;
+		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(op->types[source_idx], op_bindings[source_idx]));
+	}
+
+	auto logical_projection =
+	    make_uniq<LogicalProjection>(optimizer.binder.GenerateTableIndex(), std::move(proj_exprs));
+	logical_projection->children.push_back(std::move(op));
+	logical_projection->ResolveOperatorTypes();
+
+	return unique_ptr<LogicalOperator>(std::move(logical_projection));
+}
+
 bool TopNWindowElimination::CanOptimize(LogicalOperator &op) {
 	if (op.type != LogicalOperatorType::LOGICAL_FILTER) {
 		return false;
@@ -548,6 +678,9 @@ bool TopNWindowElimination::CanOptimize(LogicalOperator &op) {
 	}
 	const auto &window = child.get().Cast<LogicalWindow>();
 	if (window.window_index != filter_col_idx) {
+		return false;
+	}
+	if (window.expressions.empty()) {
 		return false;
 	}
 	const auto &first_window_expr = window.expressions[0]->Cast<BoundWindowExpression>();

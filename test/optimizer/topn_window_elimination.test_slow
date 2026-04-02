@@ -32,6 +32,36 @@ FROM query (
 	'SELECT t1.* FROM tbl t1 INNER JOIN LATERAL (SELECT * FROM tbl t2 WHERE t1.grp = t2.grp ORDER BY b ' || sort_order || ' LIMIT ' || topn || ' ) ON true'
 )
 
+# explicit plan-shape checks for sort-based streaming path vs delim/hash path
+statement ok
+PRAGMA explain_output = OPTIMIZED_ONLY;
+
+query II
+EXPLAIN SELECT grp, b FROM (SELECT grp, b, CAST(grp AS VARCHAR) || '' AS g2 FROM tbl) t QUALIFY row_number() OVER (PARTITION BY g2 ORDER BY b) = 1 ORDER BY grp
+----
+logical_opt	<REGEX>:.*TOP_N_PER_GROUP.*ORDER_BY.*
+
+query II
+EXPLAIN SELECT grp, b FROM (SELECT grp, b, CAST(grp AS VARCHAR) || '' AS g2 FROM tbl) t QUALIFY row_number() OVER (PARTITION BY g2 ORDER BY b) = 1 ORDER BY grp
+----
+logical_opt	<!REGEX>:.*FILTER.*WINDOW.*
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+query II
+EXPLAIN SELECT grp, b FROM (SELECT grp, b, CAST(grp AS VARCHAR) || '' AS g2 FROM tbl) t QUALIFY row_number() OVER (PARTITION BY g2 ORDER BY b) = 1 ORDER BY grp
+----
+physical_plan	<REGEX>:.*STREAMING_TOP_N_PER_GROUP.*ORDER_BY.*
+
+query II
+EXPLAIN SELECT * FROM lateral_join('ASC', 1)
+----
+physical_plan	<!REGEX>:.*STREAMING_TOP_N_PER_GROUP.*
+
+statement ok
+PRAGMA explain_output = OPTIMIZED_ONLY;
+
 # test min_max
 foreach sort_order ASC DESC
 

@@ -166,6 +166,9 @@ unique_ptr<LogicalOperator> LogicalOperator::Deserialize(Deserializer &deseriali
 	case LogicalOperatorType::LOGICAL_TOP_N:
 		result = LogicalTopN::Deserialize(deserializer);
 		break;
+	case LogicalOperatorType::LOGICAL_TOP_N_PER_GROUP:
+		result = LogicalTopNPerGroup::Deserialize(deserializer);
+		break;
 	case LogicalOperatorType::LOGICAL_TRANSACTION:
 		result = LogicalSimple::Deserialize(deserializer);
 		break;
@@ -779,6 +782,25 @@ unique_ptr<LogicalOperator> LogicalTopN::Deserialize(Deserializer &deserializer)
 	auto limit = deserializer.ReadPropertyWithDefault<idx_t>(201, "limit");
 	auto offset = deserializer.ReadPropertyWithDefault<idx_t>(202, "offset");
 	auto result = duckdb::unique_ptr<LogicalTopN>(new LogicalTopN(std::move(orders), limit, offset));
+	return std::move(result);
+}
+
+void LogicalTopNPerGroup::Serialize(Serializer &serializer) const {
+	LogicalOperator::Serialize(serializer);
+	serializer.WritePropertyWithDefault<idx_t>(200, "table_index", table_index);
+	serializer.WritePropertyWithDefault<vector<unique_ptr<Expression>>>(201, "groups", groups);
+	serializer.WritePropertyWithDefault<idx_t>(202, "limit", limit);
+	serializer.WritePropertyWithDefault<bool>(203, "include_row_number", include_row_number);
+}
+
+unique_ptr<LogicalOperator> LogicalTopNPerGroup::Deserialize(Deserializer &deserializer) {
+	auto table_index = deserializer.ReadPropertyWithDefault<idx_t>(200, "table_index");
+	vector<unique_ptr<Expression>> groups;
+	deserializer.ReadPropertyWithDefault<vector<unique_ptr<Expression>>>(201, "groups", groups);
+	auto limit = deserializer.ReadPropertyWithDefault<idx_t>(202, "limit");
+	auto include_row_number = deserializer.ReadPropertyWithDefault<bool>(203, "include_row_number");
+	auto result = duckdb::unique_ptr<LogicalTopNPerGroup>(
+	    new LogicalTopNPerGroup(table_index, std::move(groups), limit, include_row_number));
 	return std::move(result);
 }
 

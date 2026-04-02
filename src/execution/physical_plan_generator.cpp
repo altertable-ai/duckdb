@@ -91,6 +91,8 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalOperator &op) {
 		return CreatePlan(op.Cast<LogicalOrder>());
 	case LogicalOperatorType::LOGICAL_TOP_N:
 		return CreatePlan(op.Cast<LogicalTopN>());
+	case LogicalOperatorType::LOGICAL_TOP_N_PER_GROUP:
+		return CreatePlan(op.Cast<LogicalTopNPerGroup>());
 	case LogicalOperatorType::LOGICAL_COPY_TO_FILE:
 		return CreatePlan(op.Cast<LogicalCopyToFile>());
 	case LogicalOperatorType::LOGICAL_DUMMY_SCAN:

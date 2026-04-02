@@ -55,6 +55,7 @@ class LogicalVacuum;
 class LogicalSet;
 class LogicalReset;
 class LogicalTopN;
+class LogicalTopNPerGroup;
 class LogicalUnnest;
 class LogicalUpdate;
 class LogicalWindow;

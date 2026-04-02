@@ -109,6 +109,13 @@ void LogicalOperatorVisitor::EnumerateExpressions(LogicalOperator &op,
 		}
 		break;
 	}
+	case LogicalOperatorType::LOGICAL_TOP_N_PER_GROUP: {
+		auto &topn = op.Cast<LogicalTopNPerGroup>();
+		for (auto &g : topn.groups) {
+			callback(&g);
+		}
+		break;
+	}
 	case LogicalOperatorType::LOGICAL_DISTINCT: {
 		auto &distinct = op.Cast<LogicalDistinct>();
 		for (auto &target : distinct.distinct_targets) {

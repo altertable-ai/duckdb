@@ -9,6 +9,7 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_sample.hpp"
 #include "duckdb/planner/operator/logical_top_n.hpp"
+#include "duckdb/planner/operator/logical_top_n_per_group.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
@@ -98,6 +99,14 @@ void LateMaterialization::ReplaceTopLevelTableIndex(LogicalOperator &root, idx_t
 			auto &top_n = op.Cast<LogicalTopN>();
 			for (auto &order : top_n.orders) {
 				ReplaceTableReferences(order.expression, new_index);
+			}
+			current_op = *op.children[0];
+			break;
+		}
+		case LogicalOperatorType::LOGICAL_TOP_N_PER_GROUP: {
+			auto &topn = op.Cast<LogicalTopNPerGroup>();
+			for (auto &g : topn.groups) {
+				ReplaceTableReferences(g, new_index);
 			}
 			current_op = *op.children[0];
 			break;

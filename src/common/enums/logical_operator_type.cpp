@@ -44,6 +44,8 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "ORDER_BY";
 	case LogicalOperatorType::LOGICAL_TOP_N:
 		return "TOP_N";
+	case LogicalOperatorType::LOGICAL_TOP_N_PER_GROUP:
+		return "TOP_N_PER_GROUP";
 	case LogicalOperatorType::LOGICAL_SAMPLE:
 		return "SAMPLE";
 	case LogicalOperatorType::LOGICAL_COPY_TO_FILE:

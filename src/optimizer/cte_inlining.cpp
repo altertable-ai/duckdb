@@ -53,7 +53,8 @@ static idx_t CountCTEReferences(const LogicalOperator &op, idx_t cte_index) {
 }
 
 static bool ContainsLimit(const LogicalOperator &op) {
-	if (op.type == LogicalOperatorType::LOGICAL_LIMIT || op.type == LogicalOperatorType::LOGICAL_TOP_N) {
+	if (op.type == LogicalOperatorType::LOGICAL_LIMIT || op.type == LogicalOperatorType::LOGICAL_TOP_N ||
+	    op.type == LogicalOperatorType::LOGICAL_TOP_N_PER_GROUP) {
 		return true;
 	}
 	if (op.children.size() != 1) {

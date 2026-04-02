@@ -39,6 +39,7 @@ void JoinFilterPushdownOptimizer::GetPushdownFilterTargets(LogicalOperator &op,
 	case LogicalOperatorType::LOGICAL_FILTER:
 	case LogicalOperatorType::LOGICAL_ORDER_BY:
 	case LogicalOperatorType::LOGICAL_TOP_N:
+	case LogicalOperatorType::LOGICAL_TOP_N_PER_GROUP:
 	case LogicalOperatorType::LOGICAL_DISTINCT:
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
@@ -155,7 +156,8 @@ bool JoinFilterPushdownOptimizer::IsFiltering(const unique_ptr<LogicalOperator> 
 	case LogicalOperatorType::LOGICAL_FILTER: {
 		return true;
 	}
-	case LogicalOperatorType::LOGICAL_TOP_N: {
+	case LogicalOperatorType::LOGICAL_TOP_N:
+	case LogicalOperatorType::LOGICAL_TOP_N_PER_GROUP: {
 		return true;
 	}
 	default:

@@ -20,6 +20,7 @@ enum class PhysicalOperatorType : uint8_t {
 	ORDER_BY,
 	LIMIT,
 	STREAMING_LIMIT,
+	STREAMING_TOP_N_PER_GROUP,
 	LIMIT_PERCENT,
 	TOP_N,
 	WINDOW,

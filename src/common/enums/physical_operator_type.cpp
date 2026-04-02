@@ -23,6 +23,8 @@ string PhysicalOperatorToString(PhysicalOperatorType type) {
 		return "LIMIT_PERCENT";
 	case PhysicalOperatorType::STREAMING_LIMIT:
 		return "STREAMING_LIMIT";
+	case PhysicalOperatorType::STREAMING_TOP_N_PER_GROUP:
+		return "STREAMING_TOP_N_PER_GROUP";
 	case PhysicalOperatorType::RESERVOIR_SAMPLE:
 		return "RESERVOIR_SAMPLE";
 	case PhysicalOperatorType::STREAMING_SAMPLE:
