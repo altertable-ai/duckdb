@@ -61,6 +61,8 @@
 
 namespace duckdb {
 
+void RegisterParquetVariantArrowExtension(DatabaseInstance &db_instance);
+
 struct ParquetWriteBindData : public TableFunctionData {
 	vector<LogicalType> sql_types;
 	vector<string> column_names;
@@ -880,6 +882,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// variant_to_parquet_variant
 	loader.RegisterFunction(VariantColumnWriter::GetTransformFunction());
+	RegisterParquetVariantArrowExtension(db_instance);
 
 	// bytes_to_variant
 	loader.RegisterFunction(VariantShreddedConversion::GetBytesToVariantFunction());
