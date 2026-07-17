@@ -1,4 +1,6 @@
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/common/enums/attachment_scope.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -80,11 +82,18 @@ void DuckTransaction::PushCatalogEntry(CatalogEntry &entry, data_ptr_t extra_dat
 	}
 }
 
-void DuckTransaction::PushAttach(AttachedDatabase &db) {
-	auto undo_entry = undo_buffer.CreateEntry(UndoFlags::ATTACHED_DATABASE, sizeof(AttachedDatabase *));
+void DuckTransaction::PushAttach(AttachedDatabase &db, AttachmentScope scope, const string &alias) {
+	const auto alias_to_store = alias.empty() ? db.GetName() : alias;
+	const idx_t entry_size = sizeof(AttachmentScope) + sizeof(uint32_t) + alias_to_store.size() + sizeof(AttachedDatabase *);
+	auto undo_entry = undo_buffer.CreateEntry(UndoFlags::ATTACHED_DATABASE, entry_size);
 	auto ptr = undo_entry.Ptr();
-	// store the pointer to the database
-	Store<CatalogEntry *>(&db, ptr);
+	Store<AttachmentScope>(scope, ptr);
+	ptr += sizeof(AttachmentScope);
+	Store<uint32_t>(NumericCast<uint32_t>(alias_to_store.size()), ptr);
+	ptr += sizeof(uint32_t);
+	memcpy(ptr, alias_to_store.data(), alias_to_store.size());
+	ptr += alias_to_store.size();
+	Store<AttachedDatabase *>(&db, ptr);
 }
 
 void DuckTransaction::PushDelete(DataTable &table, RowVersionManager &info, idx_t vector_idx, row_t rows[], idx_t count,

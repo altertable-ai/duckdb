@@ -332,6 +332,153 @@
                 },
                 "return_value": "A duckdb_value of type VARCHAR[] containing the (fully qualified) table names of the query. Must be destroyed with duckdb_destroy_value."
             }
+        },
+        {
+            "name": "duckdb_create_attach_options",
+            "return_type": "duckdb_attach_options",
+            "params": [],
+            "comment": {
+                "description": "Creates an empty attach-options object for the trusted attach API.\nMust be destroyed with `duckdb_destroy_attach_options`.\n\n",
+                "return_value": "The attach options object, or nullptr on failure."
+            }
+        },
+        {
+            "name": "duckdb_destroy_attach_options",
+            "return_type": "void",
+            "params": [
+                {
+                    "type": "duckdb_attach_options *",
+                    "name": "options"
+                }
+            ],
+            "comment": {
+                "description": "Destroys an attach-options object.\n\n",
+                "param_comments": {
+                    "options": "The attach options to destroy."
+                }
+            }
+        },
+        {
+            "name": "duckdb_attach_options_set_access_mode",
+            "return_type": "void",
+            "params": [
+                {
+                    "type": "duckdb_attach_options",
+                    "name": "options"
+                },
+                {
+                    "type": "duckdb_attach_access_mode",
+                    "name": "access_mode"
+                }
+            ],
+            "comment": {
+                "description": "Sets the access mode on attach options (automatic / read-only / read-write).\n\n",
+                "param_comments": {
+                    "options": "The attach options.",
+                    "access_mode": "The desired access mode."
+                }
+            }
+        },
+        {
+            "name": "duckdb_attach_options_set_scope",
+            "return_type": "void",
+            "params": [
+                {
+                    "type": "duckdb_attach_options",
+                    "name": "options"
+                },
+                {
+                    "type": "duckdb_attachment_scope",
+                    "name": "scope"
+                }
+            ],
+            "comment": {
+                "description": "Sets the attachment scope (global or session).\n\n",
+                "param_comments": {
+                    "options": "The attach options.",
+                    "scope": "The desired attachment scope."
+                }
+            }
+        },
+        {
+            "name": "duckdb_attach_options_set_type",
+            "return_type": "void",
+            "params": [
+                {
+                    "type": "duckdb_attach_options",
+                    "name": "options"
+                },
+                {
+                    "type": "const char *",
+                    "name": "type"
+                }
+            ],
+            "comment": {
+                "description": "Sets an optional storage type for the attach (for example \"sqlite\").\nThe type must already be available; this API does not autoload extensions.\n\n",
+                "param_comments": {
+                    "options": "The attach options.",
+                    "type": "The storage type name, or nullptr to clear."
+                }
+            }
+        },
+        {
+            "name": "duckdb_attach",
+            "return_type": "duckdb_state",
+            "params": [
+                {
+                    "type": "duckdb_connection",
+                    "name": "connection"
+                },
+                {
+                    "type": "const char *",
+                    "name": "path"
+                },
+                {
+                    "type": "const char *",
+                    "name": "name"
+                },
+                {
+                    "type": "duckdb_attach_options",
+                    "name": "options"
+                }
+            ],
+            "comment": {
+                "description": "Trusted host attach API.\nAttaches a database under `name` using the provided options.\nThis does not bypass filesystem authorization or `lock_configuration`; it only avoids SQL parsing.\n\n",
+                "param_comments": {
+                    "connection": "The connection that should observe the attachment.",
+                    "path": "The path or identifier to attach.",
+                    "name": "The attachment alias.",
+                    "options": "Optional attach options (may be nullptr for defaults)."
+                },
+                "return_value": "`DuckDBSuccess` on success or `DuckDBError` on failure."
+            }
+        },
+        {
+            "name": "duckdb_connection_clone",
+            "return_type": "duckdb_state",
+            "params": [
+                {
+                    "type": "duckdb_connection",
+                    "name": "source"
+                },
+                {
+                    "type": "duckdb_connection_clone_mode",
+                    "name": "mode"
+                },
+                {
+                    "type": "duckdb_connection *",
+                    "name": "out_connection"
+                }
+            ],
+            "comment": {
+                "description": "Creates a new connection on the same database instance.\n`DUCKDB_CONNECTION_CLONE_EMPTY` starts without session attachments.\n`DUCKDB_CONNECTION_CLONE_INHERIT_SESSION_ATTACHMENTS` copies session bindings from `source`.\nGlobal attachments are always shared by the instance. The clone has a fresh transaction and TEMP catalog.\n\n",
+                "param_comments": {
+                    "source": "The connection to clone from.",
+                    "mode": "The clone mode.",
+                    "out_connection": "Receives the new connection; must be closed with `duckdb_disconnect`."
+                },
+                "return_value": "`DuckDBSuccess` on success or `DuckDBError` on failure."
+            }
         }
     ]
 }

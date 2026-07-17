@@ -1,0 +1,125 @@
+# name: test/sql/attach/attach_scope_session.test
+# description: Session-scoped ATTACH isolation and metadata
+# group: [attach]
+
+require skip_reload
+
+statement ok
+PRAGMA enable_verification
+
+# Plain ATTACH remains globally visible
+statement ok
+ATTACH '__TEST_DIR__/scope_session_global.db' AS global_db
+
+statement ok
+CREATE TABLE global_db.g AS SELECT 1 AS i
+
+statement ok con2
+SELECT i FROM global_db.g
+
+# Session attach syntax
+statement ok
+ATTACH '__TEST_DIR__/scope_session_local_a.db' AS local_db (SCOPE SESSION)
+
+statement ok
+CREATE TABLE local_db.t AS SELECT 11 AS i
+
+# Other connections cannot see session attachments
+statement error con2
+SELECT * FROM local_db.t
+----
+Catalog Error
+
+query I
+SELECT database_name FROM duckdb_databases() WHERE database_name = 'local_db'
+----
+local_db
+
+query I con2
+SELECT count(*) FROM duckdb_databases() WHERE database_name = 'local_db'
+----
+0
+
+# Independent alias reuse across connections
+statement ok con2
+ATTACH '__TEST_DIR__/scope_session_local_b.db' AS local_db (SCOPE SESSION)
+
+statement ok con2
+CREATE TABLE local_db.t AS SELECT 22 AS i
+
+query I
+SELECT i FROM local_db.t
+----
+11
+
+query I con2
+SELECT i FROM local_db.t
+----
+22
+
+# Scoped detach only affects the caller
+statement ok
+DETACH local_db (SCOPE SESSION)
+
+statement error
+SELECT * FROM local_db.t
+----
+Catalog Error
+
+query I con2
+SELECT i FROM local_db.t
+----
+22
+
+# Session attach is transactional
+statement ok
+BEGIN
+
+statement ok
+ATTACH '__TEST_DIR__/scope_session_rollback.db' AS rolled (SCOPE SESSION)
+
+statement ok
+ROLLBACK
+
+statement error
+SELECT * FROM rolled.t
+----
+Catalog Error
+
+# Session alias can shadow a later global alias of the same name
+statement ok
+ATTACH '__TEST_DIR__/scope_session_shadow_local.db' AS shadow_db (SCOPE SESSION)
+
+statement ok
+CREATE TABLE shadow_db.t AS SELECT 100 AS i
+
+# Global attach of the same alias succeeds (session aliases are not in the global map)
+statement ok
+ATTACH '__TEST_DIR__/scope_session_shadow_global.db' AS shadow_db
+
+# Populate the global attachment from another connection (caller still resolves session-first)
+statement ok con2
+CREATE TABLE shadow_db.main.g AS SELECT 200 AS i
+
+# Caller still sees the session binding
+query I
+SELECT i FROM shadow_db.t
+----
+100
+
+query I
+SELECT database_name FROM duckdb_databases() WHERE database_name = 'shadow_db'
+----
+shadow_db
+
+# Other connections see only the global attachment
+query I con2
+SELECT i FROM shadow_db.g
+----
+200
+
+# Effective schema metadata uses the session alias
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'shadow_db'
+----
+1

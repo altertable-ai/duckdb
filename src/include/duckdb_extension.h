@@ -743,6 +743,19 @@ typedef struct {
 	void *(*duckdb_scalar_function_init_get_extra_info)(duckdb_init_info info);
 #endif
 
+// Trusted attach and connection clone APIs for session-scoped attachments
+#ifdef DUCKDB_EXTENSION_API_VERSION_UNSTABLE
+	duckdb_attach_options (*duckdb_create_attach_options)();
+	void (*duckdb_destroy_attach_options)(duckdb_attach_options *options);
+	void (*duckdb_attach_options_set_access_mode)(duckdb_attach_options options, duckdb_attach_access_mode access_mode);
+	void (*duckdb_attach_options_set_scope)(duckdb_attach_options options, duckdb_attachment_scope scope);
+	void (*duckdb_attach_options_set_type)(duckdb_attach_options options, const char *type);
+	duckdb_state (*duckdb_attach)(duckdb_connection connection, const char *path, const char *name,
+	                              duckdb_attach_options options);
+	duckdb_state (*duckdb_connection_clone)(duckdb_connection source, duckdb_connection_clone_mode mode,
+	                                        duckdb_connection *out_connection);
+#endif
+
 // New string functions that are added
 #ifdef DUCKDB_EXTENSION_API_VERSION_UNSTABLE
 	char *(*duckdb_value_to_string)(duckdb_value value);
@@ -1359,6 +1372,15 @@ typedef struct {
 #define duckdb_scalar_function_init_get_client_context duckdb_ext_api.duckdb_scalar_function_init_get_client_context
 #define duckdb_scalar_function_init_get_bind_data      duckdb_ext_api.duckdb_scalar_function_init_get_bind_data
 #define duckdb_scalar_function_init_get_extra_info     duckdb_ext_api.duckdb_scalar_function_init_get_extra_info
+
+// Version unstable_new_session_attach_functions
+#define duckdb_create_attach_options          duckdb_ext_api.duckdb_create_attach_options
+#define duckdb_destroy_attach_options         duckdb_ext_api.duckdb_destroy_attach_options
+#define duckdb_attach_options_set_access_mode duckdb_ext_api.duckdb_attach_options_set_access_mode
+#define duckdb_attach_options_set_scope       duckdb_ext_api.duckdb_attach_options_set_scope
+#define duckdb_attach_options_set_type        duckdb_ext_api.duckdb_attach_options_set_type
+#define duckdb_attach                         duckdb_ext_api.duckdb_attach
+#define duckdb_connection_clone               duckdb_ext_api.duckdb_connection_clone
 
 // Version unstable_new_string_functions
 #define duckdb_valid_utf8_check duckdb_ext_api.duckdb_valid_utf8_check

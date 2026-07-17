@@ -1,6 +1,7 @@
 #include "duckdb/function/table/system_functions.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/attachment_namespace.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 
 namespace duckdb {
@@ -9,7 +10,7 @@ struct DuckDBDatabasesData : public GlobalTableFunctionState {
 	DuckDBDatabasesData() : offset(0) {
 	}
 
-	vector<shared_ptr<AttachedDatabase>> entries;
+	vector<AttachmentBinding> entries;
 	idx_t offset;
 };
 
@@ -55,7 +56,7 @@ unique_ptr<GlobalTableFunctionState> DuckDBDatabasesInit(ClientContext &context,
 
 	// scan all the schemas for tables and collect them and collect them
 	auto &db_manager = DatabaseManager::Get(context);
-	result->entries = db_manager.GetDatabases(context);
+	result->entries = db_manager.GetEffectiveDatabases(context);
 	return std::move(result);
 }
 
@@ -69,21 +70,21 @@ void DuckDBDatabasesFunction(ClientContext &context, TableFunctionInput &data_p,
 	// either fill up the chunk or return all the remaining columns
 	idx_t count = 0;
 	while (data.offset < data.entries.size() && count < STANDARD_VECTOR_SIZE) {
-		auto &entry = data.entries[data.offset++];
-		auto &attached = *entry;
+		auto &binding = data.entries[data.offset++];
+		auto &attached = *binding.database;
 		auto &catalog = attached.GetCatalog();
-		if (attached.GetVisibility() == AttachVisibility::HIDDEN) {
+		if (binding.visibility == AttachVisibility::HIDDEN) {
 			continue;
 		}
 		// return values:
 
 		idx_t col = 0;
-		// database_name, VARCHAR
-		output.SetValue(col++, count, attached.GetName());
+		// database_name, VARCHAR — use the effective (session) alias
+		output.SetValue(col++, count, binding.alias);
 		// database_oid, BIGINT
 		output.SetValue(col++, count, Value::BIGINT(NumericCast<int64_t>(attached.oid)));
 		bool is_internal = attached.IsSystem() || attached.IsTemporary();
-		bool is_readonly = attached.IsReadOnly();
+		bool is_readonly = binding.IsReadOnly();
 		string cipher_str;
 		// path, VARCHAR
 		Value db_path;

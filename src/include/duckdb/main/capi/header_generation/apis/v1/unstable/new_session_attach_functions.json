@@ -1,0 +1,13 @@
+{
+  "version": "unstable_new_session_attach_functions",
+  "description": "Trusted attach and connection clone APIs for session-scoped attachments",
+  "entries": [
+    "duckdb_create_attach_options",
+    "duckdb_destroy_attach_options",
+    "duckdb_attach_options_set_access_mode",
+    "duckdb_attach_options_set_scope",
+    "duckdb_attach_options_set_type",
+    "duckdb_attach",
+    "duckdb_connection_clone"
+  ]
+}

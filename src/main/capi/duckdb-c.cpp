@@ -242,3 +242,98 @@ duckdb_value duckdb_get_table_names(duckdb_connection connection, const char *qu
 		return nullptr;
 	}
 }
+
+duckdb_attach_options duckdb_create_attach_options() {
+	try {
+		auto wrapper = new duckdb::CAttachOptionsWrapper();
+		return reinterpret_cast<duckdb_attach_options>(wrapper);
+	} catch (...) {
+		return nullptr;
+	}
+}
+
+void duckdb_destroy_attach_options(duckdb_attach_options *options) {
+	if (options && *options) {
+		auto wrapper = reinterpret_cast<duckdb::CAttachOptionsWrapper *>(*options);
+		delete wrapper;
+		*options = nullptr;
+	}
+}
+
+void duckdb_attach_options_set_access_mode(duckdb_attach_options options, duckdb_attach_access_mode access_mode) {
+	if (!options) {
+		return;
+	}
+	auto wrapper = reinterpret_cast<duckdb::CAttachOptionsWrapper *>(options);
+	switch (access_mode) {
+	case DUCKDB_ATTACH_ACCESS_READ_ONLY:
+		wrapper->access_mode = duckdb::AccessMode::READ_ONLY;
+		break;
+	case DUCKDB_ATTACH_ACCESS_READ_WRITE:
+		wrapper->access_mode = duckdb::AccessMode::READ_WRITE;
+		break;
+	case DUCKDB_ATTACH_ACCESS_AUTOMATIC:
+	default:
+		wrapper->access_mode = duckdb::AccessMode::AUTOMATIC;
+		break;
+	}
+}
+
+void duckdb_attach_options_set_scope(duckdb_attach_options options, duckdb_attachment_scope scope) {
+	if (!options) {
+		return;
+	}
+	auto wrapper = reinterpret_cast<duckdb::CAttachOptionsWrapper *>(options);
+	wrapper->scope =
+	    scope == DUCKDB_ATTACHMENT_SCOPE_SESSION ? duckdb::AttachmentScope::SESSION : duckdb::AttachmentScope::GLOBAL;
+}
+
+void duckdb_attach_options_set_type(duckdb_attach_options options, const char *type) {
+	if (!options) {
+		return;
+	}
+	auto wrapper = reinterpret_cast<duckdb::CAttachOptionsWrapper *>(options);
+	wrapper->type = type ? type : "";
+}
+
+duckdb_state duckdb_attach(duckdb_connection connection, const char *path, const char *name,
+                           duckdb_attach_options options) {
+	if (!connection || !path || !name) {
+		return DuckDBError;
+	}
+	auto conn = reinterpret_cast<Connection *>(connection);
+	duckdb::AccessMode access_mode = duckdb::AccessMode::AUTOMATIC;
+	duckdb::AttachmentScope scope = duckdb::AttachmentScope::GLOBAL;
+	duckdb::string db_type;
+	if (options) {
+		auto wrapper = reinterpret_cast<duckdb::CAttachOptionsWrapper *>(options);
+		access_mode = wrapper->access_mode;
+		scope = wrapper->scope;
+		db_type = wrapper->type;
+	}
+	try {
+		conn->Attach(path, name, access_mode, scope, db_type);
+		return DuckDBSuccess;
+	} catch (...) {
+		return DuckDBError;
+	}
+}
+
+duckdb_state duckdb_connection_clone(duckdb_connection source, duckdb_connection_clone_mode mode,
+                                     duckdb_connection *out_connection) {
+	if (!source || !out_connection) {
+		return DuckDBError;
+	}
+	auto conn = reinterpret_cast<Connection *>(source);
+	auto clone_mode = mode == DUCKDB_CONNECTION_CLONE_INHERIT_SESSION_ATTACHMENTS
+	                      ? duckdb::ConnectionCloneMode::INHERIT_SESSION_ATTACHMENTS
+	                      : duckdb::ConnectionCloneMode::EMPTY;
+	try {
+		auto cloned = new Connection(conn->Clone(clone_mode));
+		*out_connection = reinterpret_cast<duckdb_connection>(cloned);
+		return DuckDBSuccess;
+	} catch (...) {
+		*out_connection = nullptr;
+		return DuckDBError;
+	}
+}

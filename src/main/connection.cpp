@@ -3,9 +3,13 @@
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/function/table/read_csv.hpp"
 #include "duckdb/main/appender.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/attachment_namespace.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/main/connection_manager.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/main/relation/query_relation.hpp"
 #include "duckdb/main/relation/read_csv_relation.hpp"
@@ -13,8 +17,10 @@
 #include "duckdb/main/relation/table_relation.hpp"
 #include "duckdb/main/relation/value_relation.hpp"
 #include "duckdb/main/relation/view_relation.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/catalog/catalog_search_path.hpp"
 
 namespace duckdb {
 
@@ -26,6 +32,47 @@ Connection::Connection(DatabaseInstance &database)
 }
 
 Connection::Connection(DuckDB &database) : Connection(*database.instance) {
+}
+
+Connection Connection::Clone(ConnectionCloneMode mode) const {
+	Connection result(*context->db);
+	if (mode == ConnectionCloneMode::INHERIT_SESSION_ATTACHMENTS) {
+		ClientData::Get(*context).attachment_namespace->CopyTo(*ClientData::Get(*result.context).attachment_namespace);
+		// Copy search path entries that still resolve in the new connection.
+		auto paths = ClientData::Get(*context).catalog_search_path->GetSetPaths();
+		if (!paths.empty()) {
+			try {
+				ClientData::Get(*result.context).catalog_search_path->Set(paths, CatalogSetPathType::SET_SCHEMAS);
+			} catch (...) {
+				// Ignore search-path entries that cannot be validated on the clone.
+			}
+		}
+	}
+	return result;
+}
+
+void Connection::Attach(const string &path, const string &name, AccessMode access_mode, AttachmentScope scope,
+                        const string &db_type) {
+	AttachInfo info;
+	info.path = path;
+	info.name = name;
+	info.scope = scope;
+	if (access_mode == AccessMode::READ_ONLY) {
+		info.options["readonly"] = Value::BOOLEAN(true);
+	} else if (access_mode == AccessMode::READ_WRITE) {
+		info.options["read_write"] = Value::BOOLEAN(true);
+	}
+	if (!db_type.empty()) {
+		info.options["type"] = Value(db_type);
+	}
+	context->RunFunctionInTransaction([&]() {
+		auto &config = DBConfig::GetConfig(*context);
+		AttachOptions options(info.options, config.options.access_mode);
+		if (!db_type.empty()) {
+			options.db_type = db_type;
+		}
+		DatabaseManager::Get(*context).AttachDatabase(*context, info, options);
+	});
 }
 
 Connection::Connection(Connection &&other) noexcept {

@@ -14,6 +14,7 @@
 namespace duckdb {
 
 class AttachedDatabase;
+class AttachmentNamespace;
 class BufferedFileWriter;
 class ClientContext;
 class CatalogSearchPath;
@@ -35,6 +36,8 @@ public:
 
 	//! The set of temporary objects belonging to this client.
 	shared_ptr<AttachedDatabase> temporary_objects;
+	//! Session-scoped attachment namespace for this client.
+	unique_ptr<AttachmentNamespace> attachment_namespace;
 	//! The set of bound prepared statements belonging to this client.
 	case_insensitive_map_t<shared_ptr<PreparedStatementData>> prepared_statements;
 

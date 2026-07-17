@@ -18,6 +18,7 @@
 #include "duckdb/common/enums/aggregate_handling.hpp"
 #include "duckdb/common/enums/allow_parser_override.hpp"
 #include "duckdb/common/enums/arrow_format_version.hpp"
+#include "duckdb/common/enums/attachment_scope.hpp"
 #include "duckdb/common/enums/cache_validation_mode.hpp"
 #include "duckdb/common/enums/catalog_lookup_behavior.hpp"
 #include "duckdb/common/enums/catalog_type.hpp"
@@ -728,6 +729,24 @@ const char* EnumUtil::ToChars<AsyncResultsExecutionMode>(AsyncResultsExecutionMo
 template<>
 AsyncResultsExecutionMode EnumUtil::FromString<AsyncResultsExecutionMode>(const char *value) {
 	return static_cast<AsyncResultsExecutionMode>(StringUtil::StringToEnum(GetAsyncResultsExecutionModeValues(), 2, "AsyncResultsExecutionMode", value));
+}
+
+const StringUtil::EnumStringLiteral *GetAttachmentScopeValues() {
+	static constexpr StringUtil::EnumStringLiteral values[] {
+		{ static_cast<uint32_t>(AttachmentScope::GLOBAL), "GLOBAL" },
+		{ static_cast<uint32_t>(AttachmentScope::SESSION), "SESSION" }
+	};
+	return values;
+}
+
+template<>
+const char* EnumUtil::ToChars<AttachmentScope>(AttachmentScope value) {
+	return StringUtil::EnumToString(GetAttachmentScopeValues(), 2, "AttachmentScope", static_cast<uint32_t>(value));
+}
+
+template<>
+AttachmentScope EnumUtil::FromString<AttachmentScope>(const char *value) {
+	return static_cast<AttachmentScope>(StringUtil::StringToEnum(GetAttachmentScopeValues(), 2, "AttachmentScope", value));
 }
 
 const StringUtil::EnumStringLiteral *GetBaseColumnPrunerModeValues() {

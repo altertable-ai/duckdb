@@ -5,6 +5,7 @@
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/serializer/buffered_file_writer.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/attachment_namespace.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/database.hpp"
@@ -216,6 +217,7 @@ ClientData::ClientData(ClientContext &context) : catalog_search_path(make_uniq<C
 	profiler = make_shared_ptr<QueryProfiler>(context);
 	temporary_objects = make_shared_ptr<AttachedDatabase>(db, AttachedDatabaseType::TEMP_DATABASE);
 	temporary_objects->oid = DatabaseManager::Get(db).NextOid();
+	attachment_namespace = make_uniq<AttachmentNamespace>();
 	random_engine = make_uniq<RandomEngine>();
 	file_opener = make_uniq<ClientContextFileOpener>(context);
 	client_file_system = make_uniq<ClientFileSystem>(context);
@@ -228,6 +230,23 @@ ClientData::~ClientData() {
 	// This needs to be destroyed first because PreparedStatementData holds a PhysicalPlan,
 	// and the PhysicalPlan holds objects that might rely on the client file opener/file system/buffer manager
 	prepared_statements.clear();
+	if (attachment_namespace) {
+		auto detached = attachment_namespace->DetachAll();
+		for (auto &database : detached) {
+			if (!database) {
+				continue;
+			}
+			// Drop the physical-path registry entry when this was the last pin.
+			if (database.use_count() == 1) {
+				try {
+					auto path = database->StoredPath();
+					DatabaseManager::Get(database->GetDatabase()).UnregisterPhysicalPath(path, *database);
+				} catch (...) {
+				}
+			}
+			AttachedDatabase::InvokeCloseIfLastReference(database);
+		}
+	}
 }
 
 ClientData &ClientData::Get(ClientContext &context) {

@@ -644,6 +644,17 @@ typedef struct {
 	void (*duckdb_scalar_function_init_get_client_context)(duckdb_init_info info, duckdb_client_context *out_context);
 	void *(*duckdb_scalar_function_init_get_bind_data)(duckdb_init_info info);
 	void *(*duckdb_scalar_function_init_get_extra_info)(duckdb_init_info info);
+	// Trusted attach and connection clone APIs for session-scoped attachments
+
+	duckdb_attach_options (*duckdb_create_attach_options)();
+	void (*duckdb_destroy_attach_options)(duckdb_attach_options *options);
+	void (*duckdb_attach_options_set_access_mode)(duckdb_attach_options options, duckdb_attach_access_mode access_mode);
+	void (*duckdb_attach_options_set_scope)(duckdb_attach_options options, duckdb_attachment_scope scope);
+	void (*duckdb_attach_options_set_type)(duckdb_attach_options options, const char *type);
+	duckdb_state (*duckdb_attach)(duckdb_connection connection, const char *path, const char *name,
+	                              duckdb_attach_options options);
+	duckdb_state (*duckdb_connection_clone)(duckdb_connection source, duckdb_connection_clone_mode mode,
+	                                        duckdb_connection *out_connection);
 	// New string functions that are added
 
 	char *(*duckdb_value_to_string)(duckdb_value value);
@@ -1211,6 +1222,13 @@ inline duckdb_ext_api_v1 CreateAPIv1() {
 	result.duckdb_scalar_function_init_get_client_context = duckdb_scalar_function_init_get_client_context;
 	result.duckdb_scalar_function_init_get_bind_data = duckdb_scalar_function_init_get_bind_data;
 	result.duckdb_scalar_function_init_get_extra_info = duckdb_scalar_function_init_get_extra_info;
+	result.duckdb_create_attach_options = duckdb_create_attach_options;
+	result.duckdb_destroy_attach_options = duckdb_destroy_attach_options;
+	result.duckdb_attach_options_set_access_mode = duckdb_attach_options_set_access_mode;
+	result.duckdb_attach_options_set_scope = duckdb_attach_options_set_scope;
+	result.duckdb_attach_options_set_type = duckdb_attach_options_set_type;
+	result.duckdb_attach = duckdb_attach;
+	result.duckdb_connection_clone = duckdb_connection_clone;
 	result.duckdb_value_to_string = duckdb_value_to_string;
 	result.duckdb_valid_utf8_check = duckdb_valid_utf8_check;
 	result.duckdb_table_description_get_column_count = duckdb_table_description_get_column_count;

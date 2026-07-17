@@ -10,6 +10,7 @@
 
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/enums/attachment_scope.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
@@ -17,6 +18,7 @@
 
 namespace duckdb {
 class AttachedDatabase;
+struct AttachmentBinding;
 class Catalog;
 class CatalogEntryRetriever;
 class CatalogSet;
@@ -46,14 +48,21 @@ public:
 	void InitializeSystemCatalog();
 	//! Finalize starting up the system
 	void FinalizeStartup();
-	//! Get an attached database by its name
+	//! Get an attached database by its name (session namespace first, then global)
 	optional_ptr<AttachedDatabase> GetDatabase(ClientContext &context, const string &name);
 	shared_ptr<AttachedDatabase> GetDatabase(const string &name);
+	//! Get the effective attachment binding for a name in this context, if any.
+	bool TryGetSessionBinding(ClientContext &context, const string &name, AttachmentBinding &out);
+	//! Resolve the alias visible to this connection for a physical database (session-first).
+	string GetEffectiveAlias(ClientContext &context, AttachedDatabase &db);
+	//! Resolve the session binding for a physical database, if any.
+	bool TryGetBindingForDatabase(ClientContext &context, AttachedDatabase &db, AttachmentBinding &out);
 	//! Attach a new database
 	shared_ptr<AttachedDatabase> AttachDatabase(ClientContext &context, AttachInfo &info, AttachOptions &options);
 
 	//! Detach an existing database
 	void DetachDatabase(ClientContext &context, const string &name, OnEntryNotFound if_not_found);
+	void DetachDatabase(ClientContext &context, const string &name, OnEntryNotFound if_not_found, AttachmentScope scope);
 	//! Alter operation dispatcher
 	void Alter(ClientContext &context, AlterInfo &info);
 	//! Rollback the attach of a database
@@ -66,6 +75,8 @@ public:
 
 	//! Inserts a path to name mapping to the database paths map
 	InsertDatabasePathResult InsertDatabasePath(const AttachInfo &info, AttachOptions &options);
+	//! Drop a physical-path registry entry when the last logical binding disappears.
+	void UnregisterPhysicalPath(const string &path, AttachedDatabase &database);
 
 	//! Returns the database type. This might require checking the header of the file, in which case the file handle is
 	//! necessary. We can only grab the file handle, if it is not yet held, even for uncommitted changes. Thus, we have
@@ -75,6 +86,9 @@ public:
 	//! transaction, to a vector holding AttachedDatabase references
 	vector<shared_ptr<AttachedDatabase>> GetDatabases(ClientContext &context,
 	                                                  const optional_idx max_db_count = optional_idx());
+	//! Effective databases visible to a connection: session bindings (with local aliases) plus unshadowed globals.
+	vector<AttachmentBinding> GetEffectiveDatabases(ClientContext &context,
+	                                                const optional_idx max_db_count = optional_idx());
 	//! Scans the catalog set and returns each committed database entry
 	vector<shared_ptr<AttachedDatabase>> GetDatabases();
 	//! Returns the approximate count of attached databases.
@@ -109,6 +123,13 @@ public:
 private:
 	optional_ptr<AttachedDatabase> FinalizeAttach(ClientContext &context, AttachInfo &info,
 	                                              shared_ptr<AttachedDatabase> database);
+	shared_ptr<AttachedDatabase> AttachSessionDatabase(ClientContext &context, AttachInfo &info,
+	                                                   AttachOptions &options);
+	void DetachSessionDatabase(ClientContext &context, const string &name, OnEntryNotFound if_not_found);
+	shared_ptr<AttachedDatabase> FindPhysicalByPath(const string &path);
+	void RegisterPhysicalPath(const string &path, shared_ptr<AttachedDatabase> database);
+	shared_ptr<AttachedDatabase> CreateAndInitializeAttached(ClientContext &context, AttachInfo &info,
+	                                                         AttachOptions &options);
 
 private:
 	DatabaseInstance &db;
@@ -116,8 +137,10 @@ private:
 	shared_ptr<AttachedDatabase> system;
 	//! Lock for databases
 	mutex databases_lock;
-	//! The set of attached databases
+	//! The set of globally attached databases (alias -> physical)
 	case_insensitive_map_t<shared_ptr<AttachedDatabase>> databases;
+	//! Physical databases keyed by canonical path (non-owning; logical bindings hold the refs)
+	unordered_map<string, weak_ptr<AttachedDatabase>> physical_by_path;
 	//! The next object id handed out by the NextOid method
 	atomic<idx_t> next_oid;
 	//! The current query number

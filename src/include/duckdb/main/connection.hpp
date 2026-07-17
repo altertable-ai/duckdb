@@ -9,6 +9,8 @@
 #pragma once
 
 #include "duckdb/common/enums/profiler_format.hpp"
+#include "duckdb/common/enums/attachment_scope.hpp"
+#include "duckdb/common/enums/access_mode.hpp"
 #include "duckdb/common/serializer/buffered_file_writer.hpp"
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/function/udf_function.hpp"
@@ -32,8 +34,12 @@ class DuckDB;
 class LogicalOperator;
 class SelectStatement;
 struct CSVReaderOptions;
+struct AttachInfo;
+struct AttachOptions;
 
 typedef void (*warning_callback_t)(std::string);
+
+enum class ConnectionCloneMode : uint8_t { EMPTY = 0, INHERIT_SESSION_ATTACHMENTS = 1 };
 
 //! A connection to a database. This represents a (client) connection that can
 //! be used to query the database.
@@ -52,6 +58,12 @@ public:
 	shared_ptr<ClientContext> context;
 
 public:
+	//! Create a new connection on the same DatabaseInstance.
+	//! EMPTY starts with no session attachments; INHERIT_SESSION_ATTACHMENTS copies session bindings.
+	DUCKDB_API Connection Clone(ConnectionCloneMode mode = ConnectionCloneMode::EMPTY) const;
+	//! Trusted host attach API (does not bypass filesystem authorization or lock_configuration).
+	DUCKDB_API void Attach(const string &path, const string &name, AccessMode access_mode = AccessMode::AUTOMATIC,
+	                       AttachmentScope scope = AttachmentScope::GLOBAL, const string &db_type = string());
 	//! Returns query profiling information for the current query
 	DUCKDB_API string GetProfilingInformation(ProfilerPrintFormat format = ProfilerPrintFormat::QUERY_TREE);
 

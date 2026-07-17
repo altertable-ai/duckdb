@@ -274,6 +274,29 @@ typedef enum duckdb_config_option_scope {
 	DUCKDB_CONFIG_OPTION_SCOPE_GLOBAL = 3,
 } duckdb_config_option_scope;
 
+//! Attachment scope for ATTACH / trusted attach APIs.
+typedef enum duckdb_attachment_scope {
+	// Instance-global attachment (default DuckDB behavior).
+	DUCKDB_ATTACHMENT_SCOPE_GLOBAL = 0,
+	// Connection-local attachment alias over an instance-managed physical database.
+	DUCKDB_ATTACHMENT_SCOPE_SESSION = 1
+} duckdb_attachment_scope;
+
+//! Clone mode for `duckdb_connection_clone`.
+typedef enum duckdb_connection_clone_mode {
+	// Fresh connection with no session attachments.
+	DUCKDB_CONNECTION_CLONE_EMPTY = 0,
+	// Copy session-scoped attachment bindings (and compatible search path) into the clone.
+	DUCKDB_CONNECTION_CLONE_INHERIT_SESSION_ATTACHMENTS = 1
+} duckdb_connection_clone_mode;
+
+//! Access mode for trusted attach options.
+typedef enum duckdb_attach_access_mode {
+	DUCKDB_ATTACH_ACCESS_AUTOMATIC = 0,
+	DUCKDB_ATTACH_ACCESS_READ_ONLY = 1,
+	DUCKDB_ATTACH_ACCESS_READ_WRITE = 2
+} duckdb_attach_access_mode;
+
 //! An enum over DuckDB's catalog entry types.
 typedef enum duckdb_catalog_entry_type {
 	DUCKDB_CATALOG_ENTRY_TYPE_INVALID = 0,
@@ -540,6 +563,11 @@ typedef struct _duckdb_database {
 typedef struct _duckdb_connection {
 	void *internal_ptr;
 } * duckdb_connection;
+
+//! Options for the trusted attach API. Must be destroyed with `duckdb_destroy_attach_options`.
+typedef struct _duckdb_attach_options {
+	void *internal_ptr;
+} * duckdb_attach_options;
 
 //! A client context of a duckdb connection. Must be destroyed with `duckdb_destroy_context`.
 typedef struct _duckdb_client_context {
@@ -1082,6 +1110,75 @@ escaped) table names.
 with duckdb_destroy_value.
 */
 DUCKDB_C_API duckdb_value duckdb_get_table_names(duckdb_connection connection, const char *query, bool qualified);
+
+/*!
+Creates an empty attach-options object for the trusted attach API.
+Must be destroyed with `duckdb_destroy_attach_options`.
+
+* @return The attach options object, or nullptr on failure.
+*/
+DUCKDB_C_API duckdb_attach_options duckdb_create_attach_options();
+
+/*!
+Destroys an attach-options object.
+
+* @param options The attach options to destroy.
+*/
+DUCKDB_C_API void duckdb_destroy_attach_options(duckdb_attach_options *options);
+
+/*!
+Sets the access mode on attach options (automatic / read-only / read-write).
+
+* @param options The attach options.
+* @param access_mode The desired access mode.
+*/
+DUCKDB_C_API void duckdb_attach_options_set_access_mode(duckdb_attach_options options,
+                                                        duckdb_attach_access_mode access_mode);
+
+/*!
+Sets the attachment scope (global or session).
+
+* @param options The attach options.
+* @param scope The desired attachment scope.
+*/
+DUCKDB_C_API void duckdb_attach_options_set_scope(duckdb_attach_options options, duckdb_attachment_scope scope);
+
+/*!
+Sets an optional storage type for the attach (for example "sqlite").
+The type must already be available; this API does not autoload extensions.
+
+* @param options The attach options.
+* @param type The storage type name, or nullptr to clear.
+*/
+DUCKDB_C_API void duckdb_attach_options_set_type(duckdb_attach_options options, const char *type);
+
+/*!
+Trusted host attach API.
+Attaches a database under `name` using the provided options.
+This does not bypass filesystem authorization or `lock_configuration`; it only avoids SQL parsing.
+
+* @param connection The connection that should observe the attachment.
+* @param path The path or identifier to attach.
+* @param name The attachment alias.
+* @param options Optional attach options (may be nullptr for defaults).
+* @return `DuckDBSuccess` on success or `DuckDBError` on failure.
+*/
+DUCKDB_C_API duckdb_state duckdb_attach(duckdb_connection connection, const char *path, const char *name,
+                                        duckdb_attach_options options);
+
+/*!
+Creates a new connection on the same database instance.
+`DUCKDB_CONNECTION_CLONE_EMPTY` starts without session attachments.
+`DUCKDB_CONNECTION_CLONE_INHERIT_SESSION_ATTACHMENTS` copies session bindings from `source`.
+Global attachments are always shared by the instance. The clone has a fresh transaction and TEMP catalog.
+
+* @param source The connection to clone from.
+* @param mode The clone mode.
+* @param out_connection Receives the new connection; must be closed with `duckdb_disconnect`.
+* @return `DuckDBSuccess` on success or `DuckDBError` on failure.
+*/
+DUCKDB_C_API duckdb_state duckdb_connection_clone(duckdb_connection source, duckdb_connection_clone_mode mode,
+                                                  duckdb_connection *out_connection);
 
 //----------------------------------------------------------------------------------------------------------------------
 // Configuration

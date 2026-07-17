@@ -12,6 +12,7 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/query_parameters.hpp"
+#include "duckdb/common/enums/attachment_scope.hpp"
 #include "duckdb/common/enums/database_modification_type.hpp"
 
 namespace duckdb {
@@ -77,9 +78,14 @@ struct StatementProperties {
 	struct CatalogIdentity {
 		idx_t catalog_oid;
 		optional_idx catalog_version;
+		//! GLOBAL or SESSION attachment that produced this identity at bind time.
+		AttachmentScope scope = AttachmentScope::GLOBAL;
+		//! Session binding generation (0 for global). Invalidates prepared statements after alias reuse.
+		idx_t binding_generation = 0;
 
 		bool operator==(const CatalogIdentity &rhs) const {
-			return catalog_oid == rhs.catalog_oid && catalog_version == rhs.catalog_version;
+			return catalog_oid == rhs.catalog_oid && catalog_version == rhs.catalog_version && scope == rhs.scope &&
+			       binding_generation == rhs.binding_generation;
 		}
 
 		bool operator!=(const CatalogIdentity &rhs) const {

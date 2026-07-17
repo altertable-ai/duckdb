@@ -1,0 +1,42 @@
+# name: test/sql/extensions/sqlite_connection_local_attach.test
+# description: Session-scoped SQLite attaches are not shared across unrelated connections
+# group: [extensions]
+
+require-env LOCAL_EXTENSION_REPO
+
+require sqlite_scanner
+
+require skip_reload
+
+statement ok
+SET autoinstall_known_extensions=true;
+
+statement ok
+SET autoload_known_extensions=true;
+
+statement ok
+ATTACH '__TEST_DIR__/sqlite_session_a.db' AS sqlite_local (TYPE SQLITE, SCOPE SESSION)
+
+statement ok
+CREATE TABLE sqlite_local.main.t AS SELECT 1 AS i
+
+statement error con2
+SELECT * FROM sqlite_local.main.t
+----
+Catalog Error
+
+statement ok con2
+ATTACH '__TEST_DIR__/sqlite_session_b.db' AS sqlite_local (TYPE SQLITE, SCOPE SESSION)
+
+statement ok con2
+CREATE TABLE sqlite_local.main.t AS SELECT 2 AS i
+
+query I
+SELECT i FROM sqlite_local.main.t
+----
+1
+
+query I con2
+SELECT i FROM sqlite_local.main.t
+----
+2
