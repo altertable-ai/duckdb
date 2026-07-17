@@ -5,6 +5,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
+#include "duckdb/main/database_manager.hpp"
 
 namespace duckdb {
 
@@ -70,8 +71,8 @@ void DuckDBSchemasFunction(ClientContext &context, TableFunctionInput &data_p, D
 		idx_t col = 0;
 		// "oid", PhysicalType::BIGINT
 		output.SetValue(col++, count, Value::BIGINT(NumericCast<int64_t>(entry.oid)));
-		// database_name, VARCHAR
-		output.SetValue(col++, count, entry.catalog.GetName());
+		// database_name, VARCHAR — effective (session) alias when present
+		output.SetValue(col++, count, DatabaseManager::Get(context).GetEffectiveAlias(context, entry.catalog.GetAttached()));
 		// database_oid, BIGINT
 		output.SetValue(col++, count, Value::BIGINT(NumericCast<int64_t>(entry.catalog.GetOid())));
 		// "schema_name", PhysicalType::VARCHAR

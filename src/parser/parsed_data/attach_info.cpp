@@ -13,6 +13,7 @@ unique_ptr<AttachInfo> AttachInfo::Copy() const {
 		result->parsed_options[entry.first] = entry.second->Copy();
 	}
 	result->on_conflict = on_conflict;
+	result->scope = scope;
 	return result;
 }
 
@@ -29,8 +30,11 @@ string AttachInfo::ToString() const {
 	if (!name.empty()) {
 		result += " AS " + KeywordHelper::WriteOptionallyQuoted(name);
 	}
-	if (!parsed_options.empty() || !options.empty()) {
+	if (!parsed_options.empty() || !options.empty() || scope != AttachmentScope::GLOBAL) {
 		vector<string> stringified;
+		if (scope != AttachmentScope::GLOBAL) {
+			stringified.push_back("SCOPE SESSION");
+		}
 		for (auto &opt : parsed_options) {
 			stringified.push_back(StringUtil::Format("%s %s", opt.first, opt.second->ToString()));
 		}

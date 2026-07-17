@@ -1,6 +1,9 @@
 #include "duckdb/common/enums/statement_type.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/attachment_namespace.hpp"
+#include "duckdb/main/client_data.hpp"
 
 namespace duckdb {
 
@@ -86,15 +89,33 @@ string StatementReturnTypeToString(StatementReturnType type) {
 }
 // LCOV_EXCL_STOP
 
+static StatementProperties::CatalogIdentity CreateCatalogIdentity(Catalog &catalog, ClientContext &context) {
+	StatementProperties::CatalogIdentity identity;
+	identity.catalog_oid = catalog.GetOid();
+	identity.catalog_version = catalog.GetCatalogVersion(context);
+	identity.scope = AttachmentScope::GLOBAL;
+	identity.binding_generation = 0;
+
+	auto &db = catalog.GetAttached();
+	for (auto &binding : ClientData::Get(context).attachment_namespace->List()) {
+		if (binding.database && RefersToSameObject(*binding.database, db)) {
+			identity.scope = AttachmentScope::SESSION;
+			identity.binding_generation = binding.generation;
+			break;
+		}
+	}
+	return identity;
+}
+
 void StatementProperties::RegisterDBRead(Catalog &catalog, ClientContext &context) {
-	auto catalog_identity = CatalogIdentity {catalog.GetOid(), catalog.GetCatalogVersion(context)};
+	auto catalog_identity = CreateCatalogIdentity(catalog, context);
 	D_ASSERT(read_databases.count(catalog.GetName()) == 0 || read_databases[catalog.GetName()] == catalog_identity);
 	read_databases[catalog.GetName()] = catalog_identity;
 }
 
 void StatementProperties::RegisterDBModify(Catalog &catalog, ClientContext &context,
                                            DatabaseModificationType modification) {
-	auto catalog_identity = CatalogIdentity {catalog.GetOid(), catalog.GetCatalogVersion(context)};
+	auto catalog_identity = CreateCatalogIdentity(catalog, context);
 	auto entry = modified_databases.insert(make_pair(catalog.GetName(), ModificationInfo()));
 	if (entry.second) {
 		// new entry - set the identity

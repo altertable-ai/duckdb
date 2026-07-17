@@ -13,6 +13,7 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/transaction/undo_buffer.hpp"
 #include "duckdb/common/enums/active_transaction_state.hpp"
+#include "duckdb/common/enums/attachment_scope.hpp"
 
 namespace duckdb {
 class CheckpointLock;
@@ -55,7 +56,7 @@ public:
 	LocalStorage &GetLocalStorage();
 
 	void PushCatalogEntry(CatalogEntry &entry, data_ptr_t extra_data, idx_t extra_data_size);
-	void PushAttach(AttachedDatabase &db);
+	void PushAttach(AttachedDatabase &db, AttachmentScope scope = AttachmentScope::GLOBAL, const string &alias = "");
 
 	void SetModifications(DatabaseModificationType type) override;
 

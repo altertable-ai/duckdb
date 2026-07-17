@@ -6,6 +6,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/main/query_result.hpp"
@@ -110,6 +111,9 @@ public:
 	virtual const Value ColumnComment(idx_t col) = 0;
 
 	void WriteColumns(idx_t index, idx_t start_col, idx_t end_col, DataChunk &output);
+
+protected:
+	string database_name;
 };
 
 class TableColumnHelper : public ColumnHelper {
@@ -209,15 +213,21 @@ private:
 };
 
 unique_ptr<ColumnHelper> ColumnHelper::Create(ClientContext &context, CatalogEntry &entry) {
+	unique_ptr<ColumnHelper> helper;
 	switch (entry.type) {
 	case CatalogType::TABLE_ENTRY:
-		return make_uniq<TableColumnHelper>(entry.Cast<TableCatalogEntry>());
+		helper = make_uniq<TableColumnHelper>(entry.Cast<TableCatalogEntry>());
+		break;
 	case CatalogType::VIEW_ENTRY:
-		return make_uniq<ViewColumnHelper>(context, entry.Cast<ViewCatalogEntry>());
+		helper = make_uniq<ViewColumnHelper>(context, entry.Cast<ViewCatalogEntry>());
+		break;
 	default:
 		throw NotImplementedException({{"catalog_type", CatalogTypeToString(entry.type)}},
 		                              "Unsupported catalog type for duckdb_columns");
 	}
+	helper->database_name =
+	    DatabaseManager::Get(context).GetEffectiveAlias(context, entry.Cast<StandardEntry>().catalog.GetAttached());
+	return helper;
 }
 
 void ColumnHelper::WriteColumns(idx_t start_index, idx_t start_col, idx_t end_col, DataChunk &output) {
@@ -226,8 +236,8 @@ void ColumnHelper::WriteColumns(idx_t start_index, idx_t start_col, idx_t end_co
 		auto &entry = Entry();
 
 		idx_t col = 0;
-		// database_name, VARCHAR
-		output.SetValue(col++, index, entry.catalog.GetName());
+		// database_name, VARCHAR — effective (session) alias when present
+		output.SetValue(col++, index, database_name);
 		// database_oid, BIGINT
 		output.SetValue(col++, index, Value::BIGINT(NumericCast<int64_t>(entry.catalog.GetOid())));
 		// schema_name, VARCHAR

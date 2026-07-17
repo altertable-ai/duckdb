@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
@@ -28,15 +29,55 @@ bool CheckCatalogIdentity(ClientContext &context, const string &catalog_name,
 	if (!catalog_identity.catalog_version.IsValid()) {
 		return false;
 	}
-	auto database = DatabaseManager::Get(context).GetDatabase(context, catalog_name);
+	auto &db_manager = DatabaseManager::Get(context);
+	auto database = db_manager.GetDatabase(context, catalog_name);
+	AttachmentBinding matched_binding;
+	bool found_binding = false;
+	if (!database) {
+		// Session aliases can differ from the physical AttachedDatabase name used at bind time.
+		for (auto &binding : db_manager.GetEffectiveDatabases(context)) {
+			if (binding.database->GetCatalog().GetOid() == catalog_identity.catalog_oid) {
+				database = binding.database.get();
+				matched_binding = binding;
+				found_binding = true;
+				break;
+			}
+		}
+	} else {
+		found_binding = db_manager.TryGetBindingForDatabase(context, *database, matched_binding);
+	}
 	if (!database) {
 		throw BinderException("Prepared statement requires database %s but it was not attached", catalog_name);
 	}
 	Transaction::Get(context, *database);
-	auto current_catalog_oid = database->GetCatalog().GetOid();
-	auto current_catalog_version = database->GetCatalog().GetCatalogVersion(context);
+	StatementProperties::CatalogIdentity current;
+	current.catalog_oid = database->GetCatalog().GetOid();
+	current.catalog_version = database->GetCatalog().GetCatalogVersion(context);
+	current.scope = AttachmentScope::GLOBAL;
+	current.binding_generation = 0;
+	if (catalog_identity.scope == AttachmentScope::SESSION) {
+		// Require the same session binding generation; alias reuse must force a rebind.
+		AttachmentBinding session_binding;
+		bool found_session = false;
+		for (auto &binding : ClientData::Get(context).attachment_namespace->List()) {
+			if (binding.database && RefersToSameObject(*binding.database, *database)) {
+				session_binding = binding;
+				found_session = true;
+				break;
+			}
+		}
+		if (!found_session) {
+			return false;
+		}
+		current.scope = AttachmentScope::SESSION;
+		current.binding_generation = session_binding.generation;
+	} else if (found_binding && ClientData::Get(context).attachment_namespace->TryGetBinding(
+	                                matched_binding.alias, matched_binding)) {
+		// Bound against a global catalog that is now shadowed/replaced by a session binding.
+		return false;
+	}
 
-	return StatementProperties::CatalogIdentity {current_catalog_oid, current_catalog_version} == catalog_identity;
+	return current == catalog_identity;
 }
 
 bool PreparedStatementData::RequireRebind(ClientContext &context,

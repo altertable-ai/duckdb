@@ -6,6 +6,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
+#include "duckdb/main/database_manager.hpp"
 
 namespace duckdb {
 
@@ -96,8 +97,9 @@ void DuckDBViewsFunction(ClientContext &context, TableFunctionInput &data_p, Dat
 			auto column_id = data.column_ids[c].GetPrimaryIndex();
 			switch (column_id) {
 			case 0:
-				// database_name, VARCHAR
-				output.SetValue(c, count, view.catalog.GetName());
+				// database_name, VARCHAR — effective (session) alias when present
+				output.SetValue(c, count,
+				                DatabaseManager::Get(context).GetEffectiveAlias(context, view.catalog.GetAttached()));
 				break;
 			case 1:
 				// database_oid, BIGINT

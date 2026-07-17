@@ -543,10 +543,21 @@ void ClientContext::CheckIfPreparedStatementIsExecutable(PreparedStatementData &
 			// database has been detached
 			throw InvalidInputException("Database \"%s\" not found", modified_database);
 		}
-		if (entry->IsReadOnly()) {
+		// Enforce binding-level access mode for session attachments that share a RW physical open.
+		AttachmentBinding session_binding;
+		bool session_readonly = false;
+		for (auto &binding : ClientData::Get(*this).attachment_namespace->List()) {
+			if (binding.database && RefersToSameObject(*binding.database, *entry) && binding.IsReadOnly()) {
+				session_readonly = true;
+				session_binding = binding;
+				break;
+			}
+		}
+		if (session_readonly || entry->IsReadOnly()) {
+			auto display_name = session_readonly ? session_binding.alias : modified_database;
 			throw InvalidInputException(StringUtil::Format(
 			    "Cannot execute statement of type \"%s\" on database \"%s\" which is attached in read-only mode!",
-			    StatementTypeToString(statement.statement_type), modified_database));
+			    StatementTypeToString(statement.statement_type), display_name));
 		}
 		meta_transaction.ModifyDatabase(*entry, it.second.modifications);
 	}

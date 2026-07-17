@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/attachment_namespace.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_path_and_type.hpp"
@@ -12,6 +13,7 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 
 namespace duckdb {
 
@@ -47,6 +49,58 @@ void DatabaseManager::FinalizeStartup() {
 	}
 }
 
+bool DatabaseManager::TryGetSessionBinding(ClientContext &context, const string &name, AttachmentBinding &out) {
+	return ClientData::Get(context).attachment_namespace->TryGetBinding(name, out);
+}
+
+bool DatabaseManager::TryGetBindingForDatabase(ClientContext &context, AttachedDatabase &db, AttachmentBinding &out) {
+	// Session bindings take precedence for the effective alias.
+	for (auto &binding : ClientData::Get(context).attachment_namespace->List()) {
+		if (binding.database && RefersToSameObject(*binding.database, db)) {
+			out = binding;
+			return true;
+		}
+	}
+	{
+		lock_guard<mutex> guard(databases_lock);
+		for (auto &entry : databases) {
+			if (entry.second && RefersToSameObject(*entry.second, db)) {
+				out.alias = entry.first;
+				out.database = entry.second;
+				out.access_mode = entry.second->IsReadOnly() ? AccessMode::READ_ONLY : AccessMode::READ_WRITE;
+				out.visibility = entry.second->GetVisibility();
+				out.generation = 0;
+				return true;
+			}
+		}
+	}
+	if (system && RefersToSameObject(*system, db)) {
+		out.alias = system->GetName();
+		out.database = system;
+		out.access_mode = AccessMode::READ_WRITE;
+		out.visibility = AttachVisibility::SHOWN;
+		out.generation = 0;
+		return true;
+	}
+	if (context.client_data->temporary_objects && RefersToSameObject(*context.client_data->temporary_objects, db)) {
+		out.alias = TEMP_CATALOG;
+		out.database = context.client_data->temporary_objects;
+		out.access_mode = AccessMode::READ_WRITE;
+		out.visibility = AttachVisibility::SHOWN;
+		out.generation = 0;
+		return true;
+	}
+	return false;
+}
+
+string DatabaseManager::GetEffectiveAlias(ClientContext &context, AttachedDatabase &db) {
+	AttachmentBinding binding;
+	if (TryGetBindingForDatabase(context, db, binding)) {
+		return binding.alias;
+	}
+	return db.GetName();
+}
+
 optional_ptr<AttachedDatabase> DatabaseManager::GetDatabase(ClientContext &context, const string &name) {
 	auto &meta_transaction = MetaTransaction::Get(context);
 	// first check if we have a local reference to this database already
@@ -54,6 +108,13 @@ optional_ptr<AttachedDatabase> DatabaseManager::GetDatabase(ClientContext &conte
 	if (database) {
 		// we do! return it
 		return database;
+	}
+	// session namespace shadows the global alias map
+	if (StringUtil::Lower(name) != TEMP_CATALOG && StringUtil::Lower(name) != SYSTEM_CATALOG) {
+		auto session_db = ClientData::Get(context).attachment_namespace->GetDatabase(name);
+		if (session_db) {
+			return meta_transaction.UseDatabase(session_db);
+		}
 	}
 	lock_guard<mutex> guard(databases_lock);
 	shared_ptr<AttachedDatabase> db;
@@ -99,6 +160,179 @@ bool RequiresTrackingAttaches(const string &path, const string &db_type) {
 	return true;
 }
 
+shared_ptr<AttachedDatabase> DatabaseManager::FindPhysicalByPath(const string &path) {
+	if (path.empty() || path == IN_MEMORY_PATH) {
+		return nullptr;
+	}
+	lock_guard<mutex> guard(databases_lock);
+	auto entry = physical_by_path.find(path);
+	if (entry == physical_by_path.end()) {
+		return nullptr;
+	}
+	auto pinned = entry->second.lock();
+	if (!pinned) {
+		physical_by_path.erase(entry);
+	}
+	return pinned;
+}
+
+void DatabaseManager::RegisterPhysicalPath(const string &path, shared_ptr<AttachedDatabase> database) {
+	if (path.empty() || path == IN_MEMORY_PATH) {
+		return;
+	}
+	lock_guard<mutex> guard(databases_lock);
+	physical_by_path[path] = database;
+}
+
+void DatabaseManager::UnregisterPhysicalPath(const string &path, AttachedDatabase &database) {
+	if (path.empty() || path == IN_MEMORY_PATH) {
+		return;
+	}
+	lock_guard<mutex> guard(databases_lock);
+	auto entry = physical_by_path.find(path);
+	if (entry == physical_by_path.end()) {
+		return;
+	}
+	auto pinned = entry->second.lock();
+	if (!pinned || RefersToSameObject(*pinned, database)) {
+		physical_by_path.erase(entry);
+	}
+}
+
+shared_ptr<AttachedDatabase> DatabaseManager::CreateAndInitializeAttached(ClientContext &context, AttachInfo &info,
+                                                                          AttachOptions &options) {
+	auto &db_instance = DatabaseInstance::GetDatabase(context);
+	auto attached_db = db_instance.CreateAttachedDatabase(context, info, options);
+
+	//! Initialize the database.
+	if (options.is_main_database) {
+		attached_db->SetInitialDatabase();
+		attached_db->Initialize(context);
+	} else {
+		attached_db->Initialize(context);
+		if (!options.default_table.name.empty()) {
+			attached_db->GetCatalog().SetDefaultTable(options.default_table.schema, options.default_table.name);
+		}
+		attached_db->FinalizeLoad(context);
+	}
+	return attached_db;
+}
+
+shared_ptr<AttachedDatabase> DatabaseManager::AttachSessionDatabase(ClientContext &context, AttachInfo &info,
+                                                                    AttachOptions &options) {
+	auto &ns = *ClientData::Get(context).attachment_namespace;
+	AttachmentBinding existing_binding;
+	if (ns.TryGetBinding(info.name, existing_binding)) {
+		if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT ||
+		    info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+			auto existing_ro = existing_binding.IsReadOnly();
+			auto requested_ro = options.access_mode == AccessMode::READ_ONLY;
+			if (existing_ro != requested_ro && options.access_mode != AccessMode::AUTOMATIC) {
+				auto existing_mode = existing_ro ? AccessMode::READ_ONLY : AccessMode::READ_WRITE;
+				throw BinderException("Database \"%s\" is already attached in %s mode, cannot re-attach in %s mode",
+				                      info.name, EnumUtil::ToString(existing_mode),
+				                      EnumUtil::ToString(options.access_mode));
+			}
+			if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+				return existing_binding.database;
+			}
+			// REPLACE: fall through and replace the binding
+		} else {
+			throw BinderException(
+			    "Failed to attach database: database with name \"%s\" already exists in this session", info.name);
+		}
+	}
+
+	bool requires_tracking_attaches = RequiresTrackingAttaches(info.path, options.db_type);
+	shared_ptr<AttachedDatabase> attached_db;
+	if (requires_tracking_attaches) {
+		attached_db = FindPhysicalByPath(info.path);
+		if (attached_db) {
+			// Reuse the physical open. Binding-level access mode enforces READ_ONLY when requested.
+			if (attached_db->IsReadOnly() && options.access_mode == AccessMode::READ_WRITE) {
+				throw BinderException(
+				    "Unique file handle conflict: Cannot attach \"%s\" - the database file \"%s\" is already "
+				    "attached in READ_ONLY mode",
+				    info.name, info.path);
+			}
+		}
+	}
+
+	// Remember the caller-requested mode for the session binding. Native files are opened with a
+	// shareable physical handle so READ_ONLY and READ_WRITE session bindings can reuse one open.
+	auto requested_access_mode = options.access_mode;
+	if (requested_access_mode == AccessMode::AUTOMATIC) {
+		requested_access_mode = AccessMode::READ_WRITE;
+	}
+
+	if (!attached_db) {
+		if (requires_tracking_attaches) {
+			// Open the physical database read-write so later session bindings can mix access modes.
+			if (options.access_mode == AccessMode::READ_ONLY) {
+				options.access_mode = AccessMode::READ_WRITE;
+			}
+			auto insert_result = InsertDatabasePath(info, options);
+			if (insert_result == InsertDatabasePathResult::ALREADY_EXISTS) {
+				attached_db = FindPhysicalByPath(info.path);
+				if (!attached_db) {
+					// Another attach is in progress - wait briefly for the physical registry.
+					auto profiler = context.client_data->profiler->StartTimer(MetricType::WAITING_TO_ATTACH_LATENCY);
+					while (!attached_db) {
+						attached_db = FindPhysicalByPath(info.path);
+						if (attached_db) {
+							break;
+						}
+						{
+							lock_guard<mutex> guard(databases_lock);
+							auto entry = databases.find(info.name);
+							if (entry != databases.end() && entry->second->StoredPath() == info.path) {
+								attached_db = entry->second;
+								break;
+							}
+						}
+						if (context.interrupted) {
+							throw InterruptException();
+						}
+					}
+				}
+			}
+		}
+		if (!attached_db) {
+			auto &config = DBConfig::GetConfig(context);
+			GetDatabaseType(context, info, config, options);
+			if (!options.db_type.empty()) {
+				options.stored_database_path.reset();
+			}
+			if (AttachedDatabase::NameIsReserved(info.name)) {
+				throw BinderException("Attached database name \"%s\" cannot be used because it is a reserved name",
+				                      info.name);
+			}
+			if (requires_tracking_attaches && options.access_mode == AccessMode::READ_ONLY) {
+				options.access_mode = AccessMode::READ_WRITE;
+			}
+			attached_db = CreateAndInitializeAttached(context, info, options);
+			attached_db->oid = NextOid();
+			if (requires_tracking_attaches) {
+				RegisterPhysicalPath(info.path, attached_db);
+			}
+		}
+	} else if (attached_db->IsReadOnly() && requested_access_mode == AccessMode::READ_WRITE) {
+		throw BinderException(
+		    "Unique file handle conflict: Cannot attach \"%s\" - the database file \"%s\" is already "
+		    "attached in READ_ONLY mode",
+		    info.name, info.path);
+	}
+
+	ns.Attach(info.name, attached_db, requested_access_mode, options.visibility);
+
+	auto &meta_transaction = MetaTransaction::Get(context);
+	auto &db_ref = meta_transaction.UseDatabase(attached_db);
+	auto &transaction = DuckTransaction::Get(context, *system);
+	auto &transaction_manager = DuckTransactionManager::Get(*system);
+	transaction_manager.PushAttach(transaction, db_ref, AttachmentScope::SESSION, info.name);
+	return attached_db;
+}
+
 shared_ptr<AttachedDatabase> DatabaseManager::AttachDatabase(ClientContext &context, AttachInfo &info,
                                                              AttachOptions &options) {
 	string extension = "";
@@ -115,6 +349,16 @@ shared_ptr<AttachedDatabase> DatabaseManager::AttachDatabase(ClientContext &cont
 		// canonicalize the path to the database
 		auto &fs = FileSystem::GetFileSystem(context);
 		info.path = fs.CanonicalizePath(info.path);
+	}
+
+	if (info.scope == AttachmentScope::SESSION) {
+		if (!extension.empty()) {
+			if (!ExtensionHelper::TryAutoLoadExtension(context, extension)) {
+				throw MissingExtensionException("Attaching path '%s' requires extension '%s' to be loaded", info.path,
+				                                extension);
+			}
+		}
+		return AttachSessionDatabase(context, info, options);
 	}
 
 	// for IGNORE / REPLACE ON CONFLICT - first look for an existing entry
@@ -146,6 +390,8 @@ shared_ptr<AttachedDatabase> DatabaseManager::AttachDatabase(ClientContext &cont
 	}
 
 	if (requires_tracking_attaches) {
+		// Global ATTACH keeps DatabaseFilePathManager conflict semantics (including mixed RO/RW).
+		// Session attachments perform physical reuse separately in AttachSessionDatabase.
 		// Start timing the ATTACH-delay step.
 		auto profiler = context.client_data->profiler->StartTimer(MetricType::WAITING_TO_ATTACH_LATENCY);
 
@@ -158,7 +404,6 @@ shared_ptr<AttachedDatabase> DatabaseManager::AttachDatabase(ClientContext &cont
 				// it does! return it
 				return existing_db;
 			}
-
 			// ... but it might not be done attaching yet!
 			// verify the database has actually finished attaching prior to returning
 			lock_guard<mutex> guard(databases_lock);
@@ -189,30 +434,34 @@ shared_ptr<AttachedDatabase> DatabaseManager::AttachDatabase(ClientContext &cont
 		}
 	}
 
-	// now create the attached database
-	auto &db = DatabaseInstance::GetDatabase(context);
-	auto attached_db = db.CreateAttachedDatabase(context, info, options);
-
-	//! Initialize the database.
-	if (options.is_main_database) {
-		attached_db->SetInitialDatabase();
-		attached_db->Initialize(context);
-	} else {
-		attached_db->Initialize(context);
-		if (!options.default_table.name.empty()) {
-			attached_db->GetCatalog().SetDefaultTable(options.default_table.schema, options.default_table.name);
+	// Reject alias collisions before opening a new physical database so we do not leak path leases.
+	if (info.on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT &&
+	    info.on_conflict != OnCreateConflict::IGNORE_ON_CONFLICT) {
+		if (GetDatabase(info.name)) {
+			throw BinderException("Failed to attach database: database with name \"%s\" already exists", info.name);
 		}
-		attached_db->FinalizeLoad(context);
 	}
 
+	auto attached_db = CreateAndInitializeAttached(context, info, options);
 	FinalizeAttach(context, info, attached_db);
+	if (requires_tracking_attaches) {
+		RegisterPhysicalPath(info.path, attached_db);
+	}
 	return attached_db;
 }
 
 optional_ptr<AttachedDatabase> DatabaseManager::FinalizeAttach(ClientContext &context, AttachInfo &info,
                                                                shared_ptr<AttachedDatabase> attached_db) {
-	const auto name = attached_db->GetName();
-	attached_db->oid = NextOid();
+	// Logical alias comes from AttachInfo. Only rename the physical object when we exclusively own it;
+	// shared physical opens keep their original name so session bindings stay stable.
+	const auto name = info.name.empty() ? attached_db->GetName() : info.name;
+	if (!StringUtil::CIEquals(attached_db->GetName(), name) && attached_db.use_count() == 1) {
+		attached_db->SetName(name);
+	}
+	// Shared physical opens must keep a stable OID for prepared-statement catalog identity.
+	if (!attached_db->oid) {
+		attached_db->oid = NextOid();
+	}
 	if (default_database.empty()) {
 		default_database = name;
 	}
@@ -243,7 +492,53 @@ optional_ptr<AttachedDatabase> DatabaseManager::FinalizeAttach(ClientContext &co
 	return db_ref;
 }
 
+void DatabaseManager::DetachSessionDatabase(ClientContext &context, const string &name,
+                                            OnEntryNotFound if_not_found) {
+	AttachmentBinding session_binding;
+	if (StringUtil::CIEquals(GetDefaultDatabase(context), name) && TryGetSessionBinding(context, name, session_binding)) {
+		throw BinderException("Cannot detach database \"%s\" because it is the default database. Select a "
+		                      "different database using `USE` to allow detaching this database",
+		                      name);
+	}
+
+	auto &ns = *ClientData::Get(context).attachment_namespace;
+	auto attached_db = ns.Detach(name);
+	if (!attached_db) {
+		if (if_not_found == OnEntryNotFound::THROW_EXCEPTION) {
+			throw BinderException("Failed to detach database with name \"%s\": database not found", name);
+		}
+		return;
+	}
+
+	auto &meta_transaction = MetaTransaction::Get(context);
+	meta_transaction.DetachDatabase(*attached_db);
+
+	auto path = attached_db->StoredPath();
+	// Only run OnDetach / path cleanup when this was the last reference.
+	if (attached_db.use_count() == 1) {
+		UnregisterPhysicalPath(path, *attached_db);
+		attached_db->OnDetach(context);
+	}
+	AttachedDatabase::InvokeCloseIfLastReference(attached_db);
+}
+
 void DatabaseManager::DetachDatabase(ClientContext &context, const string &name, OnEntryNotFound if_not_found) {
+	// Plain DETACH matches catalog resolution: remove a session binding when present, otherwise global.
+	AttachmentBinding session_binding;
+	if (TryGetSessionBinding(context, name, session_binding)) {
+		DetachSessionDatabase(context, name, if_not_found);
+		return;
+	}
+	DetachDatabase(context, name, if_not_found, AttachmentScope::GLOBAL);
+}
+
+void DatabaseManager::DetachDatabase(ClientContext &context, const string &name, OnEntryNotFound if_not_found,
+                                     AttachmentScope scope) {
+	if (scope == AttachmentScope::SESSION) {
+		DetachSessionDatabase(context, name, if_not_found);
+		return;
+	}
+
 	if (StringUtil::CIEquals(GetDefaultDatabase(context), name)) {
 		throw BinderException("Cannot detach database \"%s\" because it is the default database. Select a different "
 		                      "database using `USE` to allow detaching this database",
@@ -258,6 +553,11 @@ void DatabaseManager::DetachDatabase(ClientContext &context, const string &name,
 		return;
 	}
 
+	auto &meta_transaction = MetaTransaction::Get(context);
+	meta_transaction.DetachDatabase(*attached_db);
+
+	auto path = attached_db->StoredPath();
+	UnregisterPhysicalPath(path, *attached_db);
 	attached_db->OnDetach(context);
 
 	// DetachInternal removes the AttachedDatabase from the list of databases that can be referenced.
@@ -414,26 +714,63 @@ void DatabaseManager::SetDefaultDatabase(ClientContext &context, const string &n
 }
 // LCOV_EXCL_STOP
 
+vector<AttachmentBinding> DatabaseManager::GetEffectiveDatabases(ClientContext &context,
+                                                                 const optional_idx max_db_count) {
+	vector<AttachmentBinding> result;
+	case_insensitive_set_t seen_aliases;
+
+	auto session_bindings = ClientData::Get(context).attachment_namespace->List();
+	for (auto &binding : session_bindings) {
+		if (max_db_count.IsValid() && result.size() >= max_db_count.GetIndex()) {
+			return result;
+		}
+		if (binding.visibility == AttachVisibility::HIDDEN) {
+			continue;
+		}
+		seen_aliases.insert(binding.alias);
+		result.push_back(std::move(binding));
+	}
+
+	{
+		lock_guard<mutex> guard(databases_lock);
+		for (auto &entry : databases) {
+			if (max_db_count.IsValid() && result.size() >= max_db_count.GetIndex()) {
+				return result;
+			}
+			if (seen_aliases.find(entry.first) != seen_aliases.end()) {
+				continue;
+			}
+			AttachmentBinding binding;
+			binding.alias = entry.first;
+			binding.database = entry.second;
+			binding.access_mode = entry.second->IsReadOnly() ? AccessMode::READ_ONLY : AccessMode::READ_WRITE;
+			binding.visibility = entry.second->GetVisibility();
+			result.push_back(std::move(binding));
+		}
+	}
+	if (!max_db_count.IsValid() || result.size() < max_db_count.GetIndex()) {
+		AttachmentBinding binding;
+		binding.alias = system->GetName();
+		binding.database = system;
+		binding.access_mode = AccessMode::READ_WRITE;
+		result.push_back(std::move(binding));
+	}
+	if (!max_db_count.IsValid() || result.size() < max_db_count.GetIndex()) {
+		AttachmentBinding binding;
+		binding.alias = TEMP_CATALOG;
+		binding.database = context.client_data->temporary_objects;
+		binding.access_mode = AccessMode::READ_WRITE;
+		result.push_back(std::move(binding));
+	}
+	return result;
+}
+
 vector<shared_ptr<AttachedDatabase>> DatabaseManager::GetDatabases(ClientContext &context,
                                                                    const optional_idx max_db_count) {
 	vector<shared_ptr<AttachedDatabase>> result;
-
-	lock_guard<mutex> guard(databases_lock);
-	idx_t count = 2;
-	for (auto &entry : databases) {
-		if (max_db_count.IsValid() && count >= max_db_count.GetIndex()) {
-			break;
-		}
-		result.push_back(entry.second);
-		count++;
+	for (auto &binding : GetEffectiveDatabases(context, max_db_count)) {
+		result.push_back(std::move(binding.database));
 	}
-	if (!max_db_count.IsValid() || max_db_count.GetIndex() >= 1) {
-		result.push_back(system);
-	}
-	if (!max_db_count.IsValid() || max_db_count.GetIndex() >= 2) {
-		result.push_back(context.client_data->temporary_objects);
-	}
-
 	return result;
 }
 
@@ -450,9 +787,16 @@ vector<shared_ptr<AttachedDatabase>> DatabaseManager::GetDatabases() {
 
 void DatabaseManager::ResetDatabases() {
 	auto shared_db_pointers = GetDatabases();
+	{
+		lock_guard<mutex> guard(databases_lock);
+		physical_by_path.clear();
+		databases.clear();
+	}
 	for (auto &entry : shared_db_pointers) {
-		entry->Close(DatabaseCloseAction::TRY_CHECKPOINT);
-		entry.reset();
+		if (entry) {
+			entry->Close(DatabaseCloseAction::TRY_CHECKPOINT);
+			entry.reset();
+		}
 	}
 }
 

@@ -2,8 +2,11 @@
 
 #include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/attachment_namespace.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 
 namespace duckdb {
@@ -239,6 +242,13 @@ void MetaTransaction::ModifyDatabase(AttachedDatabase &db, DatabaseModificationT
 	if (IsReadOnly()) {
 		throw TransactionException("Cannot write to database \"%s\" - transaction is launched in read-only mode",
 		                           db.GetName());
+	}
+	// Enforce session-binding READ_ONLY even when the shared physical open is read-write.
+	for (auto &binding : ClientData::Get(context).attachment_namespace->List()) {
+		if (RefersToSameObject(*binding.database, db) && binding.IsReadOnly()) {
+			throw TransactionException("Cannot write to database \"%s\" - it is attached in READ_ONLY mode",
+			                           binding.alias);
+		}
 	}
 	auto &transaction = GetTransaction(db);
 	if (transaction.IsReadOnly()) {

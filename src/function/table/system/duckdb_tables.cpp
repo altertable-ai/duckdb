@@ -6,6 +6,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/constraint.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -115,8 +116,8 @@ void DuckDBTablesFunction(ClientContext &context, TableFunctionInput &data_p, Da
 		auto storage_info = table.GetStorageInfo(context);
 		// return values:
 		idx_t col = 0;
-		// database_name, VARCHAR
-		output.SetValue(col++, count, table.catalog.GetName());
+		// database_name, VARCHAR — effective (session) alias when present
+		output.SetValue(col++, count, DatabaseManager::Get(context).GetEffectiveAlias(context, table.catalog.GetAttached()));
 		// database_oid, BIGINT
 		output.SetValue(col++, count, Value::BIGINT(NumericCast<int64_t>(table.catalog.GetOid())));
 		// schema_name, LogicalType::VARCHAR

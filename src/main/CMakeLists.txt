@@ -18,6 +18,7 @@ add_library_unity(
   OBJECT
   appender.cpp
   attached_database.cpp
+  attachment_namespace.cpp
   client_config.cpp
   client_context_file_opener.cpp
   client_context.cpp

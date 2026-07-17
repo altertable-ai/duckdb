@@ -11,6 +11,7 @@
 #include "duckdb/parser/parsed_data/parse_info.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/common/enums/attachment_scope.hpp"
 #include "duckdb/common/enums/on_create_conflict.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
 
@@ -34,6 +35,8 @@ public:
 	unordered_map<string, Value> options;
 	//! What to do on create conflict
 	OnCreateConflict on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+	//! Whether the attachment is global or session-scoped
+	AttachmentScope scope = AttachmentScope::GLOBAL;
 
 public:
 	//! Copies this AttachInfo and returns an unique pointer to the new AttachInfo.
