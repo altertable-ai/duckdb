@@ -37,12 +37,6 @@ struct DatabaseWrapper {
 	shared_ptr<DuckDB> database;
 };
 
-struct CAttachOptionsWrapper {
-	AccessMode access_mode = AccessMode::AUTOMATIC;
-	AttachmentScope scope = AttachmentScope::GLOBAL;
-	string type;
-};
-
 struct CClientContextWrapper {
 	explicit CClientContextWrapper(ClientContext &context) : context(context) {};
 	ClientContext &context;

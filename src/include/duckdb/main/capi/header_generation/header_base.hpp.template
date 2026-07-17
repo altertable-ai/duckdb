@@ -274,29 +274,6 @@ typedef enum duckdb_config_option_scope {
 	DUCKDB_CONFIG_OPTION_SCOPE_GLOBAL = 3,
 } duckdb_config_option_scope;
 
-//! Attachment scope for ATTACH / trusted attach APIs.
-typedef enum duckdb_attachment_scope {
-	// Instance-global attachment (default DuckDB behavior).
-	DUCKDB_ATTACHMENT_SCOPE_GLOBAL = 0,
-	// Connection-local attachment alias over an instance-managed physical database.
-	DUCKDB_ATTACHMENT_SCOPE_SESSION = 1
-} duckdb_attachment_scope;
-
-//! Clone mode for `duckdb_connection_clone`.
-typedef enum duckdb_connection_clone_mode {
-	// Fresh connection with no session attachments.
-	DUCKDB_CONNECTION_CLONE_EMPTY = 0,
-	// Copy session-scoped attachment bindings (and compatible search path) into the clone.
-	DUCKDB_CONNECTION_CLONE_INHERIT_SESSION_ATTACHMENTS = 1
-} duckdb_connection_clone_mode;
-
-//! Access mode for trusted attach options.
-typedef enum duckdb_attach_access_mode {
-	DUCKDB_ATTACH_ACCESS_AUTOMATIC = 0,
-	DUCKDB_ATTACH_ACCESS_READ_ONLY = 1,
-	DUCKDB_ATTACH_ACCESS_READ_WRITE = 2
-} duckdb_attach_access_mode;
-
 //! An enum over DuckDB's catalog entry types.
 typedef enum duckdb_catalog_entry_type {
 	DUCKDB_CATALOG_ENTRY_TYPE_INVALID = 0,
@@ -563,11 +540,6 @@ typedef struct _duckdb_database {
 typedef struct _duckdb_connection {
 	void *internal_ptr;
 } * duckdb_connection;
-
-//! Options for the trusted attach API. Must be destroyed with `duckdb_destroy_attach_options`.
-typedef struct _duckdb_attach_options {
-	void *internal_ptr;
-} * duckdb_attach_options;
 
 //! A client context of a duckdb connection. Must be destroyed with `duckdb_destroy_context`.
 typedef struct _duckdb_client_context {
