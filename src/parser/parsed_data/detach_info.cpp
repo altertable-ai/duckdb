@@ -10,7 +10,6 @@ unique_ptr<DetachInfo> DetachInfo::Copy() const {
 	auto result = make_uniq<DetachInfo>();
 	result->name = name;
 	result->if_not_found = if_not_found;
-	result->scope = scope;
 	return result;
 }
 
@@ -21,9 +20,6 @@ string DetachInfo::ToString() const {
 		result += " IF EXISTS";
 	}
 	result += " " + KeywordHelper::WriteOptionallyQuoted(name);
-	if (scope == AttachmentScope::SESSION) {
-		result += " (SCOPE SESSION)";
-	}
 	result += ";";
 	return result;
 }

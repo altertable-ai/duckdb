@@ -523,6 +523,12 @@ void DatabaseManager::DetachSessionDatabase(ClientContext &context, const string
 }
 
 void DatabaseManager::DetachDatabase(ClientContext &context, const string &name, OnEntryNotFound if_not_found) {
+	// Plain DETACH matches catalog resolution: remove a session binding when present, otherwise global.
+	AttachmentBinding session_binding;
+	if (TryGetSessionBinding(context, name, session_binding)) {
+		DetachSessionDatabase(context, name, if_not_found);
+		return;
+	}
 	DetachDatabase(context, name, if_not_found, AttachmentScope::GLOBAL);
 }
 

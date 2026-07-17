@@ -41,7 +41,7 @@ void RunBenchmark(DuckDBBenchmarkState *state) override {
 	for (idx_t i = 0; i < 16; i++) {
 		auto path = BenchAttachPath(1000 + i);
 		state->conn.Query("ATTACH '" + path + "' AS s" + to_string(i) + " (SCOPE SESSION)");
-		state->conn.Query("DETACH s" + to_string(i) + " (SCOPE SESSION)");
+		state->conn.Query("DETACH s" + to_string(i));
 	}
 }
 string VerifyResult(QueryResult *result) override {

@@ -391,14 +391,12 @@ void DetachInfo::Serialize(Serializer &serializer) const {
 	ParseInfo::Serialize(serializer);
 	serializer.WritePropertyWithDefault<string>(200, "name", name);
 	serializer.WriteProperty<OnEntryNotFound>(201, "if_not_found", if_not_found);
-	serializer.WritePropertyWithDefault<AttachmentScope>(202, "scope", scope, AttachmentScope::GLOBAL);
 }
 
 unique_ptr<ParseInfo> DetachInfo::Deserialize(Deserializer &deserializer) {
 	auto result = duckdb::unique_ptr<DetachInfo>(new DetachInfo());
 	deserializer.ReadPropertyWithDefault<string>(200, "name", result->name);
 	deserializer.ReadProperty<OnEntryNotFound>(201, "if_not_found", result->if_not_found);
-	deserializer.ReadPropertyWithExplicitDefault<AttachmentScope>(202, "scope", result->scope, AttachmentScope::GLOBAL);
 	return std::move(result);
 }
 

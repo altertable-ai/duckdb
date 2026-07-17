@@ -57,9 +57,9 @@ SELECT i FROM local_db.t
 ----
 22
 
-# Scoped detach only affects the caller
+# Plain DETACH removes the session binding for the caller (session-first)
 statement ok
-DETACH local_db (SCOPE SESSION)
+DETACH local_db
 
 statement error
 SELECT * FROM local_db.t
@@ -123,3 +123,12 @@ query I
 SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'shadow_db'
 ----
 1
+
+# Plain DETACH peels the session shadow; the global attachment remains
+statement ok
+DETACH shadow_db
+
+query I
+SELECT i FROM shadow_db.g
+----
+200

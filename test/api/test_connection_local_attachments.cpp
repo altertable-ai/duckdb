@@ -140,7 +140,7 @@ TEST_CASE("Connection::Clone can inherit session attachments", "[api][session_at
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(CHECK_COLUMN(result, 0, {9}));
 
-	REQUIRE_NO_FAIL(inherited.Query("DETACH only_mine (SCOPE SESSION)"));
+	REQUIRE_NO_FAIL(inherited.Query("DETACH only_mine"));
 	REQUIRE_FAIL(inherited.Query("SELECT * FROM only_mine.t"));
 	REQUIRE_NO_FAIL(con1.Query("SELECT i FROM only_mine.t"));
 }
@@ -168,7 +168,7 @@ TEST_CASE("Concurrent session attach/detach on distinct paths", "[api][session_a
 				auto alias = "s" + to_string(t) + "_" + to_string(i);
 				REQUIRE_NO_FAIL(con.Query("ATTACH '" + path + "' AS " + alias + " (SCOPE SESSION)"));
 				REQUIRE_NO_FAIL(con.Query("CREATE TABLE " + alias + ".t AS SELECT " + to_string(i) + " AS i"));
-				REQUIRE_NO_FAIL(con.Query("DETACH " + alias + " (SCOPE SESSION)"));
+				REQUIRE_NO_FAIL(con.Query("DETACH " + alias));
 				successes++;
 			}
 		});
@@ -189,7 +189,7 @@ TEST_CASE("Prepared statements invalidate after session detach", "[api][session_
 	auto prepared = con.Prepare("SELECT i FROM prep_db.t");
 	REQUIRE_NO_FAIL(*prepared->Execute());
 
-	REQUIRE_NO_FAIL(con.Query("DETACH prep_db (SCOPE SESSION)"));
+	REQUIRE_NO_FAIL(con.Query("DETACH prep_db"));
 	auto after_detach = prepared->Execute();
 	REQUIRE(after_detach->HasError());
 

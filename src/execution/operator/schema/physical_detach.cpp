@@ -1,7 +1,6 @@
 #include "duckdb/execution/operator/schema/physical_detach.hpp"
 #include "duckdb/parser/parsed_data/detach_info.hpp"
 #include "duckdb/catalog/catalog.hpp"
-#include "duckdb/common/enums/attachment_scope.hpp"
 #include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
@@ -23,11 +22,11 @@ SourceResultType PhysicalDetach::GetDataInternal(ExecutionContext &context, Data
 	// Reject detach if the current transaction already has outstanding work on the database.
 	// Important: do not use GetDatabase(context, ...) here — that pins the database in the
 	// meta-transaction and prevents the subsequent detach from closing the file handle.
+	// Lookup mirrors DETACH resolution: session binding first, then global.
 	{
-		shared_ptr<AttachedDatabase> attached_db;
-		if (info->scope == AttachmentScope::SESSION) {
-			attached_db = ClientData::Get(context.client).attachment_namespace->GetDatabase(info->name);
-		} else {
+		shared_ptr<AttachedDatabase> attached_db =
+		    ClientData::Get(context.client).attachment_namespace->GetDatabase(info->name);
+		if (!attached_db) {
 			attached_db = db_manager.GetDatabase(info->name);
 		}
 		if (attached_db) {
@@ -41,7 +40,7 @@ SourceResultType PhysicalDetach::GetDataInternal(ExecutionContext &context, Data
 		}
 	}
 
-	db_manager.DetachDatabase(context.client, info->name, info->if_not_found, info->scope);
+	db_manager.DetachDatabase(context.client, info->name, info->if_not_found);
 
 	return SourceResultType::FINISHED;
 }

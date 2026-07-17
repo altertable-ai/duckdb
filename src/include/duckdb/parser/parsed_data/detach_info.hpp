@@ -9,7 +9,6 @@
 #pragma once
 
 #include "duckdb/parser/parsed_data/parse_info.hpp"
-#include "duckdb/common/enums/attachment_scope.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
 
 namespace duckdb {
@@ -25,8 +24,6 @@ public:
 	string name;
 	//! Whether to throw an exception if alias is not found
 	OnEntryNotFound if_not_found;
-	//! Whether to detach a global or session-scoped attachment
-	AttachmentScope scope = AttachmentScope::GLOBAL;
 
 public:
 	unique_ptr<DetachInfo> Copy() const;

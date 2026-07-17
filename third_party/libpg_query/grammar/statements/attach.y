@@ -34,28 +34,25 @@ AttachStmt:
 		;
 
 DetachStmt:
-				DETACH ColLabel opt_attach_options
+				DETACH ColLabel
 				{
 					PGDetachStmt *n = makeNode(PGDetachStmt);
 					n->missing_ok = false;
 					n->db_name = $2;
-					n->options = $3;
 					$$ = (PGNode *)n;
 				}
-			|	DETACH DATABASE ColLabel opt_attach_options
+			|	DETACH DATABASE ColLabel
 				{
 					PGDetachStmt *n = makeNode(PGDetachStmt);
 					n->missing_ok = false;
 					n->db_name = $3;
-					n->options = $4;
 					$$ = (PGNode *)n;
 				}
-			|	DETACH DATABASE IF_P EXISTS ColLabel opt_attach_options
+			|	DETACH DATABASE IF_P EXISTS ColLabel
 				{
 					PGDetachStmt *n = makeNode(PGDetachStmt);
 					n->missing_ok = true;
 					n->db_name = $5;
-					n->options = $6;
 					$$ = (PGNode *)n;
 				}
 		;
