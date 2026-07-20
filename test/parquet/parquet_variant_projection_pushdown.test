@@ -1,0 +1,244 @@
+# name: test/parquet/parquet_variant_projection_pushdown.test
+# description: Selective VARIANT projection should avoid reading unselected shredded siblings
+# group: [parquet]
+
+require parquet
+
+require json
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+SET variant_minimum_shredding_size = 0
+
+# Fully shredded object with nested keys
+statement ok
+COPY (
+	SELECT {
+		'env': CASE WHEN i % 3 = 0 THEN 'staging' WHEN i % 3 = 1 THEN 'prod' ELSE NULL END,
+		'nested': {'region': CASE WHEN i % 2 = 0 THEN 'us' ELSE 'eu' END, 'zone': i % 5},
+		'payload': repeat('Z', 64)
+	}::VARIANT AS v
+	FROM range(6) t(i)
+) TO '__TEST_DIR__/variant_proj_full.parquet' (
+	FORMAT PARQUET,
+	SHREDDING {
+		v: 'STRUCT(
+			env VARCHAR,
+			nested STRUCT(region VARCHAR, zone INTEGER),
+			payload VARCHAR
+		)'
+	}
+)
+
+# Partially shredded: env sometimes lives in the untyped field value
+statement ok
+COPY (
+	SELECT {
+		'env': CASE WHEN i % 2 = 0 THEN 'staging'::VARIANT ELSE i::VARIANT END,
+		'other': i
+	}::VARIANT AS v
+	FROM range(4) t(i)
+) TO '__TEST_DIR__/variant_proj_partial.parquet' (
+	FORMAT PARQUET,
+	SHREDDING {
+		v: 'STRUCT(env VARCHAR, other INTEGER)'
+	}
+)
+
+# Large sibling for bytes A/B.
+# Prefetch so local TOTAL_BYTES_READ includes column page IO; disable the external file
+# cache so the COPY that created the file does not zero out subsequent read accounting.
+statement ok
+SET prefetch_all_parquet_files = true
+
+statement ok
+SET enable_external_file_cache = false
+
+statement ok
+COPY (
+	SELECT {
+		'env': 'staging',
+		'payload': md5(i::VARCHAR) || md5((i * 7)::VARCHAR) || repeat(md5((i * 99)::VARCHAR), 40)
+	}::VARIANT AS v
+	FROM range(300) t(i)
+) TO '__TEST_DIR__/variant_proj_bytes.parquet' (
+	FORMAT PARQUET,
+	COMPRESSION 'uncompressed',
+	SHREDDING {
+		v: 'STRUCT(env VARCHAR, payload VARCHAR)'
+	}
+)
+
+# Top-level key projection
+query I
+SELECT v.env FROM read_parquet('__TEST_DIR__/variant_proj_full.parquet') ORDER BY 1 NULLS LAST
+----
+prod
+prod
+staging
+staging
+NULL
+NULL
+
+# Nested keys and multiple sibling paths
+query III
+SELECT v.env, v.nested.region, v.nested.zone
+FROM read_parquet('__TEST_DIR__/variant_proj_full.parquet')
+ORDER BY v.nested.zone, v.env NULLS LAST
+----
+staging	us	0
+NULL	eu	0
+prod	eu	1
+NULL	us	2
+staging	eu	3
+prod	us	4
+
+# variant_extract form (optimizer records the same field paths)
+query II
+SELECT variant_extract(v, 'env'), variant_extract(variant_extract(v, 'nested'), 'region')
+FROM read_parquet('__TEST_DIR__/variant_proj_full.parquet')
+ORDER BY 1 NULLS LAST, 2
+----
+prod	eu
+prod	us
+staging	eu
+staging	us
+NULL	eu
+NULL	us
+
+# Projection-only filter
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/variant_proj_full.parquet') WHERE v.env = 'staging'
+----
+2
+
+# Filter-only
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/variant_proj_full.parquet') WHERE v.env = 'prod'
+----
+2
+
+# SQL NULL shredded field vs missing key
+query II
+SELECT v.env IS NULL, v.missing_key IS NULL
+FROM read_parquet('__TEST_DIR__/variant_proj_full.parquet')
+WHERE v.nested.zone = 2
+----
+true	true
+
+# Non-object shredded roots still project safely from Parquet
+statement ok
+COPY (
+	SELECT CASE WHEN i = 0 THEN 'not_an_object'::VARIANT
+	            ELSE {'env': 'ok', 'payload': 'x'}::VARIANT END AS v
+	FROM range(2) t(i)
+) TO '__TEST_DIR__/variant_proj_nonobject.parquet' (
+	FORMAT PARQUET,
+	SHREDDING { v: 'STRUCT(env VARCHAR, payload VARCHAR)' }
+)
+
+query I
+SELECT v.env FROM read_parquet('__TEST_DIR__/variant_proj_nonobject.parquet') ORDER BY 1 NULLS LAST
+----
+ok
+NULL
+
+# Mixed typed/untyped field values (partial shredding)
+query II
+SELECT v.env::VARCHAR, v.other
+FROM read_parquet('__TEST_DIR__/variant_proj_partial.parquet')
+ORDER BY v.other
+----
+staging	0
+1	1
+staging	2
+3	3
+
+# Full-root plus field references → full-reader semantics (unselected siblings present)
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/variant_proj_full.parquet')
+WHERE v IS NOT NULL AND v.payload IS NOT NULL AND v.env IS NOT DISTINCT FROM variant_extract(v, 'env')
+----
+6
+
+# Unresolved shredded path → full reader (no false missing)
+query I
+SELECT count(*) FROM read_parquet('__TEST_DIR__/variant_proj_full.parquet') WHERE v.not_shredded IS NULL
+----
+6
+
+# Array indexing remains a non-projected control
+statement ok
+COPY (
+	SELECT {'arr': [i, i + 1, i + 2]}::VARIANT AS v
+	FROM range(5) t(i)
+) TO '__TEST_DIR__/variant_proj_array.parquet' (
+	FORMAT PARQUET,
+	SHREDDING { v: 'STRUCT(arr INTEGER[])' }
+)
+
+query I
+SELECT v.arr[1] FROM read_parquet('__TEST_DIR__/variant_proj_array.parquet') ORDER BY 1
+----
+0
+1
+2
+3
+4
+
+# Selected path must read fewer bytes than consuming the full VARIANT
+statement ok
+PRAGMA enable_profiling = 'json'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/variant_proj_selected_profile.json'
+
+statement ok
+PRAGMA custom_profiling_settings='{"TOTAL_BYTES_READ": "true"}'
+
+statement ok
+SELECT sum(strlen(v.env::VARCHAR)) FROM read_parquet('__TEST_DIR__/variant_proj_bytes.parquet')
+
+statement ok
+PRAGMA disable_profiling
+
+statement ok
+CREATE OR REPLACE TABLE variant_proj_selected_profile AS
+SELECT * FROM '__TEST_DIR__/variant_proj_selected_profile.json'
+
+statement ok
+PRAGMA enable_profiling = 'json'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/variant_proj_full_profile.json'
+
+statement ok
+PRAGMA custom_profiling_settings='{"TOTAL_BYTES_READ": "true"}'
+
+statement ok
+SELECT sum(strlen(v::VARCHAR)) FROM read_parquet('__TEST_DIR__/variant_proj_bytes.parquet')
+
+statement ok
+PRAGMA disable_profiling
+
+statement ok
+CREATE OR REPLACE TABLE variant_proj_full_profile AS
+SELECT * FROM '__TEST_DIR__/variant_proj_full_profile.json'
+
+statement ok
+RESET custom_profiling_settings
+
+statement ok
+RESET profiling_output
+
+statement ok
+RESET enable_profiling
+
+# Require a clear win (not a 1-byte fluke): selected path must read < 25% of full VARIANT IO.
+query I
+SELECT total_bytes_read * 4 < (SELECT total_bytes_read FROM variant_proj_full_profile)
+FROM variant_proj_selected_profile
+----
+true

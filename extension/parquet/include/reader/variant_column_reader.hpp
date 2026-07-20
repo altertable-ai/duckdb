@@ -19,7 +19,7 @@ public:
 
 public:
 	VariantColumnReader(ClientContext &context, const ParquetReader &reader, const ParquetColumnSchema &schema,
-	                    vector<unique_ptr<ColumnReader>> child_readers_p);
+	                    vector<unique_ptr<ColumnReader>> child_readers_p, bool projected_mode_p = false);
 
 	ClientContext &context;
 	vector<unique_ptr<ColumnReader>> child_readers;
@@ -39,7 +39,9 @@ public:
 
 protected:
 	idx_t metadata_reader_idx;
-	idx_t value_reader_idx;
+	optional_idx value_reader_idx;
+	optional_idx typed_value_reader_idx;
+	bool projected_mode;
 };
 
 } // namespace duckdb
