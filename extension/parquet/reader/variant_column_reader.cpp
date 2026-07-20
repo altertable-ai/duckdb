@@ -9,18 +9,35 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 VariantColumnReader::VariantColumnReader(ClientContext &context, const ParquetReader &reader,
                                          const ParquetColumnSchema &schema,
-                                         vector<unique_ptr<ColumnReader>> child_readers_p)
-    : ColumnReader(reader, schema), context(context), child_readers(std::move(child_readers_p)) {
+                                         vector<unique_ptr<ColumnReader>> child_readers_p, bool projected_mode_p)
+    : ColumnReader(reader, schema), context(context), child_readers(std::move(child_readers_p)),
+      projected_mode(projected_mode_p) {
 	D_ASSERT(Type().InternalType() == PhysicalType::STRUCT);
 
-	if (child_readers[0]->Schema().name == "metadata" && child_readers[1]->Schema().name == "value") {
-		metadata_reader_idx = 0;
-		value_reader_idx = 1;
-	} else if (child_readers[1]->Schema().name == "metadata" && child_readers[0]->Schema().name == "value") {
-		metadata_reader_idx = 1;
-		value_reader_idx = 0;
-	} else {
-		throw InternalException("The Variant column must have 'metadata' and 'value' as the first two columns");
+	optional_idx metadata_idx;
+	for (idx_t i = 0; i < schema.children.size(); i++) {
+		auto &child_name = schema.children[i].name;
+		if (child_name == "metadata") {
+			metadata_idx = i;
+		} else if (child_name == "value") {
+			value_reader_idx = i;
+		} else if (child_name == "typed_value") {
+			typed_value_reader_idx = i;
+		}
+	}
+	if (!metadata_idx.IsValid()) {
+		throw InternalException("The Variant column must have a 'metadata' child");
+	}
+	metadata_reader_idx = metadata_idx.GetIndex();
+	if (!child_readers[metadata_reader_idx]) {
+		throw InternalException("The Variant column requires a 'metadata' reader");
+	}
+	if (!projected_mode) {
+		if (!value_reader_idx.IsValid() || !child_readers[value_reader_idx.GetIndex()]) {
+			throw InternalException("The Variant column must have 'metadata' and 'value' as children");
+		}
+	} else if (value_reader_idx.IsValid() && child_readers[value_reader_idx.GetIndex()]) {
+		throw InternalException("Projected Variant reads must omit the root 'value' reader");
 	}
 }
 
@@ -55,13 +72,14 @@ idx_t VariantColumnReader::Read(uint64_t num_values, data_ptr_t define_out, data
 	if (pending_skips > 0) {
 		throw InternalException("VariantColumnReader cannot have pending skips");
 	}
-	optional_ptr<ColumnReader> typed_value_reader = child_readers.size() == 3 ? child_readers[2].get() : nullptr;
+	optional_ptr<ColumnReader> typed_value_reader;
+	if (typed_value_reader_idx.IsValid()) {
+		typed_value_reader = child_readers[typed_value_reader_idx.GetIndex()].get();
+	}
 
 	// If the child reader values are all valid, "define_out" may not be initialized at all
 	// So, we just initialize them to all be valid beforehand
 	std::fill_n(define_out, num_values, MaxDefine());
-
-	optional_idx read_count;
 
 	Vector metadata_intermediate(LogicalType::BLOB, num_values);
 	Vector intermediate_group(GetIntermediateGroupType(typed_value_reader), num_values);
@@ -70,17 +88,22 @@ idx_t VariantColumnReader::Read(uint64_t num_values, data_ptr_t define_out, data
 
 	auto metadata_values =
 	    child_readers[metadata_reader_idx]->Read(num_values, define_out, repeat_out, metadata_intermediate);
-	auto value_values = child_readers[value_reader_idx]->Read(num_values, define_out, repeat_out, value_intermediate);
 
-	D_ASSERT(child_readers[metadata_reader_idx]->Schema().name == "metadata");
-	D_ASSERT(child_readers[value_reader_idx]->Schema().name == "value");
-
-	if (metadata_values != value_values) {
-		throw InvalidInputException(
-		    "The Variant column did not contain the same amount of values for 'metadata' and 'value'");
+	idx_t value_values;
+	if (value_reader_idx.IsValid() && child_readers[value_reader_idx.GetIndex()]) {
+		value_values =
+		    child_readers[value_reader_idx.GetIndex()]->Read(num_values, define_out, repeat_out, value_intermediate);
+		if (metadata_values != value_values) {
+			throw InvalidInputException(
+			    "The Variant column did not contain the same amount of values for 'metadata' and 'value'");
+		}
+	} else {
+		// Projected reads omit the root value column; treat every row as missing untyped leftovers.
+		value_intermediate.SetVectorType(VectorType::CONSTANT_VECTOR);
+		ConstantVector::SetNull(value_intermediate, true);
+		value_values = metadata_values;
 	}
 
-	vector<VariantValue> intermediate;
 	if (typed_value_reader) {
 		auto typed_values = typed_value_reader->Read(num_values, define_out, repeat_out, *group_entries[1]);
 		if (typed_values != value_values) {
@@ -88,12 +111,11 @@ idx_t VariantColumnReader::Read(uint64_t num_values, data_ptr_t define_out, data
 			    "The shredded Variant column did not contain the same amount of values for 'typed_value' and 'value'");
 		}
 	}
-	intermediate =
+	auto intermediate =
 	    VariantShreddedConversion::Convert(metadata_intermediate, intermediate_group, 0, num_values, num_values);
 	VariantValue::ToVARIANT(intermediate, result);
 
-	read_count = value_values;
-	return read_count.GetIndex();
+	return value_values;
 }
 
 void VariantColumnReader::Skip(idx_t num_values) {

@@ -411,6 +411,132 @@ ParquetColumnSchema ParquetReader::ParseColumnSchema(const SchemaElement &s_ele,
 	                                              parquet_options);
 }
 
+namespace {
+
+optional_idx FindSchemaChildByName(const vector<ParquetColumnSchema> &children, const string &name) {
+	for (idx_t i = 0; i < children.size(); i++) {
+		if (children[i].name == name) {
+			return i;
+		}
+	}
+	return optional_idx();
+}
+
+void MergePhysicalColumnIndexes(vector<ColumnIndex> &current, ColumnIndex &&incoming) {
+	for (auto &existing : current) {
+		if (!existing.HasPrimaryIndex() || !incoming.HasPrimaryIndex()) {
+			continue;
+		}
+		if (existing.GetPrimaryIndex() != incoming.GetPrimaryIndex()) {
+			continue;
+		}
+		auto &existing_children = existing.GetChildIndexesMutable();
+		if (!incoming.HasChildren()) {
+			existing_children.clear();
+			return;
+		}
+		if (existing_children.empty()) {
+			// already reading the full child
+			return;
+		}
+		auto incoming_children = std::move(incoming.GetChildIndexesMutable());
+		for (auto &incoming_child : incoming_children) {
+			MergePhysicalColumnIndexes(existing_children, std::move(incoming_child));
+		}
+		return;
+	}
+	current.push_back(std::move(incoming));
+}
+
+//! Translate a logical VARIANT field-name path (e.g. a.b) into physical ColumnIndexes under typed_value.
+//! Includes each selected wrapper's value + typed_value children. Rejects arrays / unresolved paths.
+bool ResolveVariantProjectionPath(const ParquetColumnSchema &typed_value_schema, const ColumnIndex &logical_path,
+                                  ColumnIndex &out_physical) {
+	if (logical_path.HasPrimaryIndex()) {
+		return false;
+	}
+	if (typed_value_schema.type.id() == LogicalTypeId::LIST) {
+		return false;
+	}
+	if (typed_value_schema.type.id() != LogicalTypeId::STRUCT) {
+		return false;
+	}
+
+	auto field_idx = FindSchemaChildByName(typed_value_schema.children, logical_path.GetFieldName());
+	if (!field_idx.IsValid()) {
+		return false;
+	}
+	auto &field_wrapper = typed_value_schema.children[field_idx.GetIndex()];
+	if (field_wrapper.type.id() != LogicalTypeId::STRUCT) {
+		return false;
+	}
+
+	auto value_idx = FindSchemaChildByName(field_wrapper.children, "value");
+	auto typed_idx = FindSchemaChildByName(field_wrapper.children, "typed_value");
+	if (!value_idx.IsValid() || !typed_idx.IsValid()) {
+		// Projection requires a shredded wrapper with both value and typed_value.
+		return false;
+	}
+
+	vector<ColumnIndex> wrapper_children;
+	wrapper_children.emplace_back(value_idx.GetIndex());
+
+	auto &typed_child_schema = field_wrapper.children[typed_idx.GetIndex()];
+	if (!logical_path.HasChildren()) {
+		wrapper_children.emplace_back(typed_idx.GetIndex());
+		out_physical = ColumnIndex(field_idx.GetIndex(), std::move(wrapper_children));
+		return true;
+	}
+	if (logical_path.ChildIndexCount() != 1) {
+		return false;
+	}
+	if (typed_child_schema.type.id() == LogicalTypeId::LIST) {
+		return false;
+	}
+
+	ColumnIndex nested_physical;
+	if (!ResolveVariantProjectionPath(typed_child_schema, logical_path.GetChildIndex(0), nested_physical)) {
+		return false;
+	}
+	wrapper_children.emplace_back(typed_idx.GetIndex(), vector<ColumnIndex> {std::move(nested_physical)});
+	out_physical = ColumnIndex(field_idx.GetIndex(), std::move(wrapper_children));
+	return true;
+}
+
+struct VariantProjectionPlan {
+	idx_t metadata_idx;
+	idx_t typed_value_idx;
+	vector<ColumnIndex> typed_value_indexes;
+};
+
+bool TryBuildVariantProjectionPlan(const ParquetColumnSchema &schema, const vector<ColumnIndex> &logical_paths,
+                                   VariantProjectionPlan &plan) {
+	if (logical_paths.empty()) {
+		return false;
+	}
+	auto metadata_idx = FindSchemaChildByName(schema.children, "metadata");
+	auto typed_value_idx = FindSchemaChildByName(schema.children, "typed_value");
+	if (!metadata_idx.IsValid() || !typed_value_idx.IsValid()) {
+		return false;
+	}
+
+	plan.metadata_idx = metadata_idx.GetIndex();
+	plan.typed_value_idx = typed_value_idx.GetIndex();
+	plan.typed_value_indexes.clear();
+
+	auto &typed_value_schema = schema.children[plan.typed_value_idx];
+	for (auto &logical_path : logical_paths) {
+		ColumnIndex physical;
+		if (!ResolveVariantProjectionPath(typed_value_schema, logical_path, physical)) {
+			return false;
+		}
+		MergePhysicalColumnIndexes(plan.typed_value_indexes, std::move(physical));
+	}
+	return !plan.typed_value_indexes.empty();
+}
+
+} // namespace
+
 unique_ptr<ColumnReader> ParquetReader::CreateReaderRecursive(ClientContext &context,
                                                               const vector<ColumnIndex> &indexes,
                                                               const ParquetColumnSchema &schema) const {
@@ -455,10 +581,21 @@ unique_ptr<ColumnReader> ParquetReader::CreateReaderRecursive(ClientContext &con
 		}
 		vector<unique_ptr<ColumnReader>> children;
 		children.resize(schema.children.size());
-		for (idx_t child_index = 0; child_index < schema.children.size(); child_index++) {
-			children[child_index] = CreateReaderRecursive(context, indexes, schema.children[child_index]);
+
+		VariantProjectionPlan projection_plan;
+		if (TryBuildVariantProjectionPlan(schema, indexes, projection_plan)) {
+			// Selective projection: metadata + pruned typed_value subtree; omit root value/siblings.
+			children[projection_plan.metadata_idx] =
+			    CreateReaderRecursive(context, vector<ColumnIndex>(), schema.children[projection_plan.metadata_idx]);
+			children[projection_plan.typed_value_idx] = CreateReaderRecursive(
+			    context, projection_plan.typed_value_indexes, schema.children[projection_plan.typed_value_idx]);
+			return make_uniq<VariantColumnReader>(context, *this, schema, std::move(children), true);
 		}
-		return make_uniq<VariantColumnReader>(context, *this, schema, std::move(children));
+
+		for (idx_t child_index = 0; child_index < schema.children.size(); child_index++) {
+			children[child_index] = CreateReaderRecursive(context, vector<ColumnIndex>(), schema.children[child_index]);
+		}
+		return make_uniq<VariantColumnReader>(context, *this, schema, std::move(children), false);
 	}
 	default:
 		throw InternalException("Unsupported ParquetColumnSchemaType");
