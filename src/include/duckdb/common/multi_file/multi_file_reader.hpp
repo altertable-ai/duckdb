@@ -24,6 +24,7 @@ class LogicalGet;
 class Expression;
 class ClientContext;
 class DataChunk;
+class SampleOptions;
 
 enum class ReaderInitializeType { INITIALIZED, SKIP_READING_FILE };
 
@@ -188,6 +189,12 @@ public:
 	DUCKDB_API virtual unique_ptr<MultiFileReader> Copy() const;
 
 	DUCKDB_API virtual FileGlobInput GetGlobInput(MultiFileReaderInterface &interface);
+	//! Optionally return an execution-owned MultiFileList that applies sampling before any readers are opened.
+	//! Returning nullptr leaves the existing file list unchanged.
+	//! Appended at the end of the vtable to preserve ABI with prebuilt extensions.
+	DUCKDB_API virtual unique_ptr<MultiFileList> SamplePushdown(ClientContext &context, const MultiFileList &files,
+	                                                            const MultiFileOptions &options,
+	                                                            const SampleOptions &sample_options);
 
 protected:
 	//! Used in errors to report which function is using this MultiFileReader
