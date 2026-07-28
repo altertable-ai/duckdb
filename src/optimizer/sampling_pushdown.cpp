@@ -7,8 +7,8 @@
 
 namespace duckdb {
 
-static bool CanPushSampling(const LogicalGet &get, const SampleOptions &sample_options) {
-	if (auto supports_sampling_pushdown = SamplingPushdownRegistry::Lookup(get.function.name)) {
+static bool CanPushSampling(ClientContext &context, const LogicalGet &get, const SampleOptions &sample_options) {
+	if (auto supports_sampling_pushdown = SamplingPushdownRegistry::Lookup(context, get.function.name)) {
 		if (!get.bind_data) {
 			return false;
 		}
@@ -25,7 +25,8 @@ unique_ptr<LogicalOperator> SamplingPushdown::Optimize(unique_ptr<LogicalOperato
 		const auto &sample_options = *sample_op.sample_options;
 		const bool has_filters = !get.table_filters.filters.empty() || get.dynamic_filters;
 		const bool can_push_system_sample =
-		    sample_options.method == SampleMethod::SYSTEM_SAMPLE && !has_filters && CanPushSampling(get, sample_options);
+		    sample_options.method == SampleMethod::SYSTEM_SAMPLE && !has_filters &&
+		    CanPushSampling(context, get, sample_options);
 
 		if (can_push_system_sample) {
 			const bool is_row_count_sampling = !sample_options.is_percentage;

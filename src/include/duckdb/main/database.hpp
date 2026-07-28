@@ -36,9 +36,13 @@ struct DatabaseCacheEntry;
 class LogManager;
 class ExternalFileCache;
 class ResultSetManager;
+class FunctionData;
+class SamplingPushdownRegistry;
+struct SampleOptions;
 
 class DatabaseInstance : public enable_shared_from_this<DatabaseInstance> {
 	friend class DuckDB;
+	friend class SamplingPushdownRegistry;
 
 public:
 	DUCKDB_API DatabaseInstance();
@@ -102,6 +106,12 @@ private:
 	unique_ptr<ResultSetManager> result_set_manager;
 
 	duckdb_ext_api_v1 (*create_api_v1)();
+
+	//! Sampling pushdown eligibility callbacks registered by extensions (e.g. ducklake).
+	//! Kept on DatabaseInstance (not process-static / not DBConfig) so loadable
+	//! extensions that link libduckdb_static share state with the host optimizer
+	//! without shifting DBConfig field offsets used by prebuilt extensions.
+	unordered_map<string, bool (*)(const FunctionData &, const SampleOptions &)> sampling_pushdown_callbacks;
 };
 
 //! The database object. This object holds the catalog and all the
