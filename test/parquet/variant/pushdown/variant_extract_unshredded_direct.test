@@ -95,6 +95,23 @@ WHERE v.id = 2
 ----
 2
 
+# Unsorted metadata dictionary: writer may set sorted_strings while keys stay in insertion
+# order (here "id" before "flag"). Binary search alone would miss; linear fallback must work.
+statement ok
+COPY (
+	SELECT {'id': i::INTEGER, 'flag': (i % 2 = 0)}::VARIANT AS v
+	FROM range(3) t(i)
+) TO '{TEST_DIR}/variant_unsorted_dict_direct.parquet' (SHREDDING {'v': 'VARCHAR'});
+
+query II
+SELECT v.id::INTEGER, v.flag::BOOLEAN
+FROM '{TEST_DIR}/variant_unsorted_dict_direct.parquet'
+ORDER BY v.id::INTEGER
+----
+0	true
+1	false
+2	true
+
 # Partially shredded: typed field + binary overlay fallback
 statement ok
 COPY (

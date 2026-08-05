@@ -470,12 +470,13 @@ namespace {
 
 optional_idx FindMetadataStringId(const VariantMetadata &metadata, const string &key) {
 	auto &strings = metadata.strings;
+	//! Prefer binary search when the dictionary claims to be sorted. Some writers set the sorted flag while
+	//! leaving keys in insertion order (e.g. ["id","b"]), so fall back to a linear scan on miss.
 	if (metadata.header.sorted_strings) {
 		auto it = std::lower_bound(strings.begin(), strings.end(), key);
 		if (it != strings.end() && *it == key) {
 			return optional_idx(NumericCast<idx_t>(it - strings.begin()));
 		}
-		return optional_idx();
 	}
 	for (idx_t i = 0; i < strings.size(); i++) {
 		if (strings[i] == key) {
