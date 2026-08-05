@@ -539,8 +539,8 @@ optional_idx FindObjectChildOffset(const VariantMetadata &metadata, const Varian
 
 } // namespace
 
-VariantValue VariantBinaryDecoder::DecodePath(const VariantMetadata &metadata, const_data_ptr_t data,
-                                              idx_t data_offset, idx_t data_size, const vector<string> &path) {
+VariantValue VariantBinaryDecoder::DecodePath(const VariantMetadata &metadata, const_data_ptr_t data, idx_t data_offset,
+                                              idx_t data_size, const vector<string> &path) {
 	D_ASSERT(!path.empty());
 	idx_t offset = data_offset;
 	for (idx_t path_idx = 0; path_idx < path.size(); path_idx++) {

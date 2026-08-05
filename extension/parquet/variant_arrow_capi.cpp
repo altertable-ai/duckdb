@@ -257,10 +257,10 @@ void RegisterParquetVariantArrowExtension(DatabaseInstance &db_instance) {
 	if (config.HasArrowExtension(LogicalType::VARIANT())) {
 		return;
 	}
-	config.RegisterArrowExtension({ARROW_PARQUET_VARIANT, PopulateVariantArrowSchema, GetVariantArrowType,
-	                               make_shared_ptr<ArrowTypeExtensionData>(LogicalType::VARIANT(),
-	                                                                       GetParquetVariantStructType(),
-	                                                                       ArrowToVariant, VariantToArrow)});
+	config.RegisterArrowExtension(
+	    {ARROW_PARQUET_VARIANT, PopulateVariantArrowSchema, GetVariantArrowType,
+	     make_shared_ptr<ArrowTypeExtensionData>(LogicalType::VARIANT(), GetParquetVariantStructType(), ArrowToVariant,
+	                                             VariantToArrow)});
 }
 
 duckdb_state RegisterParquetVariantArrow(duckdb_database database) {
@@ -277,8 +277,7 @@ duckdb_state RegisterParquetVariantArrow(duckdb_database database) {
 extern "C" DUCKDB_EXTENSION_API duckdb_state duckdb_parquet_variant_bytes_to_json(duckdb_database database,
                                                                                   const uint8_t *metadata,
                                                                                   idx_t metadata_len,
-                                                                                  const uint8_t *value,
-                                                                                  idx_t value_len,
+                                                                                  const uint8_t *value, idx_t value_len,
                                                                                   char **out_json) {
 	if (!database || !out_json) {
 		return DuckDBError;
