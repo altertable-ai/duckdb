@@ -324,7 +324,8 @@ public:
 } // namespace
 
 static vector<VariantValue> ConvertBinaryEncoding(Vector &metadata, Vector &value, idx_t offset, idx_t length,
-                                                  idx_t total_size, bool add_metadata_offset = false) {
+                                                  idx_t total_size, bool add_metadata_offset = false,
+                                                  const vector<string> *extract_path = nullptr) {
 	UnifiedVectorFormat value_format;
 	value.ToUnifiedFormat(total_size, value_format);
 	auto value_data = value_format.GetData<string_t>(value_format);
@@ -334,6 +335,7 @@ static vector<VariantValue> ConvertBinaryEncoding(Vector &metadata, Vector &valu
 	metadata.ToUnifiedFormat(length, metadata_format);
 	auto metadata_data = metadata_format.GetData<string_t>(metadata_format);
 	auto metadata_validity = metadata_format.validity;
+	(void)metadata_validity;
 
 	//! Fills every row with MISSING, turned into NULL later if this is not in an OBJECT field
 	vector<VariantValue> ret(length);
@@ -356,8 +358,15 @@ static vector<VariantValue> ConvertBinaryEncoding(Vector &metadata, Vector &valu
 			//! The value bytes start directly after the metadata bytes
 			value_offset += variant_metadata.total_size;
 		}
-		ret[i] = VariantBinaryDecoder::Decode(variant_metadata, const_data_ptr_cast(binary_value), value_offset,
-		                                      value_buffer.GetSize());
+		if (extract_path && !extract_path->empty()) {
+			//! Selective path decode: skip sibling fields, then wrap so post-scan extract still works
+			auto leaf = VariantBinaryDecoder::DecodePath(variant_metadata, const_data_ptr_cast(binary_value),
+			                                             value_offset, value_buffer.GetSize(), *extract_path);
+			ret[i] = VariantBinaryDecoder::WrapSparsePath(std::move(leaf), *extract_path);
+		} else {
+			ret[i] = VariantBinaryDecoder::Decode(variant_metadata, const_data_ptr_cast(binary_value), value_offset,
+			                                      value_buffer.GetSize());
+		}
 	}
 	return ret;
 }
@@ -532,7 +541,7 @@ vector<VariantValue> VariantShreddedConversion::ConvertShreddedArray(Vector &met
 }
 
 vector<VariantValue> VariantShreddedConversion::Convert(Vector &metadata, Vector &group, idx_t offset, idx_t length,
-                                                        idx_t total_size) {
+                                                        idx_t total_size, const vector<string> *extract_path) {
 	D_ASSERT(group.GetType().id() == LogicalTypeId::STRUCT);
 
 	auto &group_entries = StructVector::GetEntries(group);
@@ -560,7 +569,12 @@ vector<VariantValue> VariantShreddedConversion::Convert(Vector &metadata, Vector
 
 	if (typed_value) {
 		auto &type = typed_value->GetType();
-		vector<VariantValue> ret;
+		//! When the root is shredded as a leaf (e.g. SHREDDING VARCHAR) the object payload lives in
+		//! binary 'value'. Prefer the selective path decode over shredding the unusable typed leaf.
+		if (extract_path && !extract_path->empty() && type.id() != LogicalTypeId::STRUCT &&
+		    type.id() != LogicalTypeId::LIST) {
+			return ConvertBinaryEncoding(metadata, *value, offset, length, total_size, false, extract_path);
+		}
 		if (type.id() == LogicalTypeId::STRUCT) {
 			return ConvertShreddedObject(metadata, *value, *typed_value, offset, length, total_size);
 		} else if (type.id() == LogicalTypeId::LIST) {
@@ -569,7 +583,7 @@ vector<VariantValue> VariantShreddedConversion::Convert(Vector &metadata, Vector
 			return ConvertShreddedLeaf(metadata, *value, *typed_value, offset, length, total_size);
 		}
 	} else {
-		return ConvertBinaryEncoding(metadata, *value, offset, length, total_size);
+		return ConvertBinaryEncoding(metadata, *value, offset, length, total_size, false, extract_path);
 	}
 }
 

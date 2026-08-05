@@ -9,9 +9,10 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 VariantColumnReader::VariantColumnReader(ClientContext &context, const ParquetReader &reader,
                                          const ParquetColumnSchema &schema,
-                                         vector<unique_ptr<ColumnReader>> child_readers_p, bool projected_mode_p)
+                                         vector<unique_ptr<ColumnReader>> child_readers_p, bool projected_mode_p,
+                                         vector<string> extract_path_p)
     : ColumnReader(reader, schema), context(context), child_readers(std::move(child_readers_p)),
-      projected_mode(projected_mode_p) {
+      extract_path(std::move(extract_path_p)), projected_mode(projected_mode_p) {
 	D_ASSERT(Type().InternalType() == PhysicalType::STRUCT);
 
 	optional_idx metadata_idx;
@@ -111,8 +112,9 @@ idx_t VariantColumnReader::Read(uint64_t num_values, data_ptr_t define_out, data
 			    "The shredded Variant column did not contain the same amount of values for 'typed_value' and 'value'");
 		}
 	}
-	auto intermediate =
-	    VariantShreddedConversion::Convert(metadata_intermediate, intermediate_group, 0, num_values, num_values);
+	const vector<string> *path_ptr = extract_path.empty() ? nullptr : &extract_path;
+	auto intermediate = VariantShreddedConversion::Convert(metadata_intermediate, intermediate_group, 0, num_values,
+	                                                       num_values, path_ptr);
 	VariantValue::ToVARIANT(intermediate, result);
 
 	return value_values;

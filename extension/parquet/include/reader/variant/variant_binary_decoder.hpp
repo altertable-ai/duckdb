@@ -138,6 +138,12 @@ public:
 public:
 	static VariantValue Decode(const VariantMetadata &metadata, const_data_ptr_t data, idx_t data_offset,
 	                           idx_t data_size);
+	//! Walk a constant key path without decoding sibling fields. Returns MISSING for absent keys /
+	//! non-object intermediates. Terminal objects/arrays still decode their complete requested subtree.
+	static VariantValue DecodePath(const VariantMetadata &metadata, const_data_ptr_t data, idx_t data_offset,
+	                               idx_t data_size, const vector<string> &path);
+	//! Rebuild a sparse object tree from 'path' so post-scan variant_extract still resolves the same keys.
+	static VariantValue WrapSparsePath(VariantValue &&leaf, const vector<string> &path);
 
 public:
 	static VariantValue PrimitiveTypeDecode(const VariantValueMetadata &value_metadata, const_data_ptr_t data,
