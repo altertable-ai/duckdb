@@ -19,10 +19,13 @@ public:
 
 public:
 	VariantColumnReader(ClientContext &context, const ParquetReader &reader, const ParquetColumnSchema &schema,
-	                    vector<unique_ptr<ColumnReader>> child_readers_p, bool projected_mode_p = false);
+	                    vector<unique_ptr<ColumnReader>> child_readers_p, bool projected_mode_p = false,
+	                    vector<string> extract_path_p = {});
 
 	ClientContext &context;
 	vector<unique_ptr<ColumnReader>> child_readers;
+	//! Optional constant key path from extract projection hints (unshredded binary fast path)
+	vector<string> extract_path;
 
 public:
 	ColumnReader &GetChildReader(idx_t child_idx);

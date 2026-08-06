@@ -592,10 +592,32 @@ unique_ptr<ColumnReader> ParquetReader::CreateReaderRecursive(ClientContext &con
 			return make_uniq<VariantColumnReader>(context, *this, schema, std::move(children), true);
 		}
 
+		//! Unshredded / non-projectable path: retain a single constant key path for selective binary decode
+		vector<string> extract_path;
+		if (indexes.size() == 1 && !indexes[0].HasPrimaryIndex()) {
+			reference<const ColumnIndex> current(indexes[0]);
+			while (true) {
+				if (current.get().HasPrimaryIndex()) {
+					extract_path.clear();
+					break;
+				}
+				extract_path.push_back(current.get().GetFieldName());
+				if (!current.get().HasChildren()) {
+					break;
+				}
+				if (current.get().ChildIndexCount() != 1) {
+					extract_path.clear();
+					break;
+				}
+				current = current.get().GetChildIndex(0);
+			}
+		}
+
 		for (idx_t child_index = 0; child_index < schema.children.size(); child_index++) {
 			children[child_index] = CreateReaderRecursive(context, vector<ColumnIndex>(), schema.children[child_index]);
 		}
-		return make_uniq<VariantColumnReader>(context, *this, schema, std::move(children), false);
+		return make_uniq<VariantColumnReader>(context, *this, schema, std::move(children), false,
+		                                      std::move(extract_path));
 	}
 	default:
 		throw InternalException("Unsupported ParquetColumnSchemaType");

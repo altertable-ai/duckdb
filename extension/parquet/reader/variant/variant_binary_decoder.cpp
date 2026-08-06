@@ -1,5 +1,7 @@
 #include "reader/variant/variant_binary_decoder.hpp"
 #include "duckdb/common/printer.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "utf8proc_wrapper.hpp"
 
 #include "reader/uuid_column_reader.hpp"
@@ -9,6 +11,8 @@
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/date.hpp"
+
+#include <algorithm>
 
 static constexpr uint8_t VERSION_MASK = 0xF;
 static constexpr uint8_t SORTED_STRINGS_MASK = 0x1;
@@ -460,6 +464,115 @@ VariantValue VariantBinaryDecoder::Decode(const VariantMetadata &variant_metadat
 	default:
 		throw IOException("Unexpected value for VariantBasicType");
 	}
+}
+
+namespace {
+
+optional_idx FindMetadataStringId(const VariantMetadata &metadata, const string &key) {
+	auto &strings = metadata.strings;
+	//! Prefer binary search when the dictionary claims to be sorted. Some writers set the sorted flag while
+	//! leaving keys in insertion order (e.g. ["id","b"]), so fall back to a linear scan on miss.
+	if (metadata.header.sorted_strings) {
+		auto it = std::lower_bound(strings.begin(), strings.end(), key);
+		if (it != strings.end() && *it == key) {
+			return optional_idx(NumericCast<idx_t>(it - strings.begin()));
+		}
+	}
+	for (idx_t i = 0; i < strings.size(); i++) {
+		if (strings[i] == key) {
+			return optional_idx(i);
+		}
+	}
+	return optional_idx();
+}
+
+//! Locate 'key' in a binary OBJECT and return the byte offset of the matching child value (header byte),
+//! or invalid when the key is absent.
+optional_idx FindObjectChildOffset(const VariantMetadata &metadata, const VariantValueMetadata &value_metadata,
+                                   const_data_ptr_t data, idx_t data_offset, idx_t data_size, const string &key) {
+	auto field_id = FindMetadataStringId(metadata, key);
+	if (!field_id.IsValid()) {
+		return optional_idx();
+	}
+
+	auto field_offset_size = value_metadata.field_offset_size;
+	auto field_id_size = value_metadata.field_id_size;
+	auto is_large = value_metadata.is_large;
+
+	idx_t num_elements;
+	idx_t cursor = data_offset;
+	if (is_large) {
+		if (cursor + sizeof(uint32_t) > data_size) {
+			throw IOException("Corrupted VARIANT 'value' buffer");
+		}
+		num_elements = Load<uint32_t>(data + cursor);
+		cursor += sizeof(uint32_t);
+	} else {
+		if (cursor + sizeof(uint8_t) > data_size) {
+			throw IOException("Corrupted VARIANT 'value' buffer");
+		}
+		num_elements = Load<uint8_t>(data + cursor);
+		cursor += sizeof(uint8_t);
+	}
+
+	auto field_ids_offset = cursor;
+	auto field_offsets_offset = cursor + (num_elements * field_id_size);
+	auto values_offset = field_offsets_offset + ((num_elements + 1) * field_offset_size);
+
+	idx_t ids_cursor = field_ids_offset;
+	idx_t offsets_cursor = field_offsets_offset;
+	idx_t last_offset = ReadVariableLengthLittleEndian(field_offset_size, data, offsets_cursor, data_size);
+	for (idx_t i = 0; i < num_elements; i++) {
+		auto id = ReadVariableLengthLittleEndian(field_id_size, data, ids_cursor, data_size);
+		auto next_offset = ReadVariableLengthLittleEndian(field_offset_size, data, offsets_cursor, data_size);
+		if (id == field_id.GetIndex()) {
+			auto child_offset = values_offset + last_offset;
+			if (child_offset >= data_size) {
+				throw IOException("Corrupted VARIANT 'value' buffer");
+			}
+			return optional_idx(child_offset);
+		}
+		last_offset = next_offset;
+	}
+	return optional_idx();
+}
+
+} // namespace
+
+VariantValue VariantBinaryDecoder::DecodePath(const VariantMetadata &metadata, const_data_ptr_t data, idx_t data_offset,
+                                              idx_t data_size, const vector<string> &path) {
+	D_ASSERT(!path.empty());
+	idx_t offset = data_offset;
+	for (idx_t path_idx = 0; path_idx < path.size(); path_idx++) {
+		if (offset + 1 > data_size) {
+			throw IOException("Corrupted VARIANT 'value' buffer");
+		}
+		auto value_metadata = VariantValueMetadata::FromHeaderByte(data[offset]);
+		if (value_metadata.basic_type != VariantBasicType::OBJECT) {
+			return VariantValue();
+		}
+		auto child_offset =
+		    FindObjectChildOffset(metadata, value_metadata, data, offset + 1, data_size, path[path_idx]);
+		if (!child_offset.IsValid()) {
+			return VariantValue();
+		}
+		offset = child_offset.GetIndex();
+	}
+	//! Decode only the terminal subtree
+	return Decode(metadata, data, offset, data_size);
+}
+
+VariantValue VariantBinaryDecoder::WrapSparsePath(VariantValue &&leaf, const vector<string> &path) {
+	if (leaf.IsMissing() || path.empty()) {
+		return std::move(leaf);
+	}
+	VariantValue current = std::move(leaf);
+	for (idx_t i = path.size(); i > 0; i--) {
+		VariantValue parent(VariantValueType::OBJECT);
+		parent.AddChild(path[i - 1], std::move(current));
+		current = std::move(parent);
+	}
+	return current;
 }
 
 } // namespace duckdb

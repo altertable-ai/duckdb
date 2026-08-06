@@ -492,8 +492,8 @@ public:
 		// optionally apply sampling pushdown after filter pruning, before any readers open
 		if (input.sample_options) {
 			auto &candidate_list = new_list ? *new_list : *bind_data.file_list;
-			auto sampled_list = bind_data.multi_file_reader->SamplePushdown(context, candidate_list,
-			                                                                bind_data.file_options, *input.sample_options);
+			auto sampled_list = bind_data.multi_file_reader->SamplePushdown(
+			    context, candidate_list, bind_data.file_options, *input.sample_options);
 			if (sampled_list) {
 				new_list = std::move(sampled_list);
 			}
