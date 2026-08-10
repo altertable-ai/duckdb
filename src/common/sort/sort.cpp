@@ -447,6 +447,11 @@ OperatorPartitionData Sort::GetPartitionData(ExecutionContext &context, DataChun
 //===--------------------------------------------------------------------===//
 // Non-Standard Interface
 //===--------------------------------------------------------------------===//
+void Sort::DestroySource(GlobalSourceState &global_state, LocalSourceState &local_state) const {
+	local_state.Cast<SortLocalSourceState>().merger_local_state.reset();
+	global_state.Cast<SortGlobalSourceState>().Destroy();
+}
+
 SourceResultType Sort::MaterializeColumnData(ExecutionContext &context, OperatorSourceInput &input) const {
 	auto &gstate = input.global_state.Cast<SortGlobalSourceState>();
 

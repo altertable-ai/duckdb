@@ -15,7 +15,7 @@ namespace duckdb {
 class HashedSortGroupScan;
 
 //! Claims and scans one finalized hash group. Each group can only be claimed once.
-//! The HashedSort, its source state, the execution context, and the interrupt state must outlive the scan.
+//! The HashedSort, its sink and source states, the execution context, and the interrupt state must outlive the scan.
 DUCKDB_API unique_ptr<HashedSortGroupScan> CreateHashedSortGroupScan(const HashedSort &hashed_sort,
                                                                      ExecutionContext &context, hash_t hash_bin,
                                                                      GlobalSourceState &global_source,
@@ -24,7 +24,7 @@ DUCKDB_API unique_ptr<HashedSortGroupScan> CreateHashedSortGroupScan(const Hashe
 //! A single-consumer scan over one finalized HashedSort hash group.
 class HashedSortGroupScan {
 public:
-	DUCKDB_API ~HashedSortGroupScan();
+	DUCKDB_API ~HashedSortGroupScan() noexcept;
 
 	DUCKDB_API SourceResultType GetData(DataChunk &chunk);
 

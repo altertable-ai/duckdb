@@ -98,6 +98,7 @@ public:
 	//===--------------------------------------------------------------------===//
 	// Non-Standard Interface
 	//===--------------------------------------------------------------------===//
+	void DestroySource(GlobalSourceState &global_state, LocalSourceState &local_state) const;
 	SourceResultType MaterializeColumnData(ExecutionContext &context, OperatorSourceInput &input) const;
 	unique_ptr<ColumnDataCollection> GetColumnData(OperatorSourceInput &input) const;
 

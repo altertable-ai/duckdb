@@ -579,6 +579,27 @@ struct HashedSortGroupScan::Impl {
 	    : sort(sort_p), context(context_p), interrupt_state(interrupt_state_p),
 	      sort_local(sort.GetLocalSourceState(context, sort_source_p)) {
 	}
+	~Impl() noexcept {
+		DestroyNoThrow();
+	}
+
+	void Destroy() {
+		if (!sort_source) {
+			return;
+		}
+		sort.DestroySource(*sort_source, *sort_local);
+		sort_local.reset();
+		sort_source.reset();
+	}
+
+	void DestroyNoThrow() noexcept {
+		try {
+			Destroy();
+		} catch (...) {
+			sort_local.reset();
+			sort_source.reset();
+		}
+	}
 
 	Sort &sort;
 	ExecutionContext &context;
@@ -590,12 +611,19 @@ struct HashedSortGroupScan::Impl {
 HashedSortGroupScan::HashedSortGroupScan() {
 }
 
-HashedSortGroupScan::~HashedSortGroupScan() {
+HashedSortGroupScan::~HashedSortGroupScan() noexcept {
 }
 
 SourceResultType HashedSortGroupScan::GetData(DataChunk &chunk) {
+	if (!impl->sort_source) {
+		return SourceResultType::FINISHED;
+	}
 	OperatorSourceInput input {*impl->sort_source, *impl->sort_local, impl->interrupt_state};
-	return impl->sort.GetData(impl->context, chunk, input);
+	const auto result = impl->sort.GetData(impl->context, chunk, input);
+	if (result == SourceResultType::FINISHED) {
+		impl->Destroy();
+	}
+	return result;
 }
 
 unique_ptr<HashedSortGroupScan> CreateHashedSortGroupScan(const HashedSort &hashed_sort, ExecutionContext &context,
