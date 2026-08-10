@@ -243,12 +243,18 @@ void HashedSortGlobalSinkState::CombineLocalPartitionEager(ExecutionContext &con
 		}
 	}
 
+	auto check_for_interrupt = [&context]() {
+		if (context.client.interrupted.load(std::memory_order_relaxed)) {
+			throw InterruptException();
+		}
+	};
 	auto &groups = local_partition->GetPartitions();
 	for (idx_t group_idx = 0; group_idx < groups.size(); ++group_idx) {
 		auto &group_data = *groups[group_idx];
 		if (!group_data.Count()) {
 			continue;
 		}
+		check_for_interrupt();
 
 		auto &hash_group = *hash_groups[group_idx];
 		TupleDataScanState scan_state;
@@ -258,7 +264,12 @@ void HashedSortGlobalSinkState::CombineLocalPartitionEager(ExecutionContext &con
 		auto sort_local = hashed_sort.sort->GetLocalSinkState(context);
 		OperatorSinkInput sink {*hash_group.sort_global, *sort_local, interrupt_state};
 		idx_t combined = 0;
-		while (group_data.Scan(scan_state, chunk)) {
+		while (true) {
+			check_for_interrupt();
+			if (!group_data.Scan(scan_state, chunk)) {
+				break;
+			}
+			check_for_interrupt();
 			hashed_sort.sort->Sink(context, chunk, sink);
 			combined += chunk.size();
 		}
