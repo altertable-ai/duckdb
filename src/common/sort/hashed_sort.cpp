@@ -1,4 +1,5 @@
 #include "duckdb/common/sorting/hashed_sort.hpp"
+#include "duckdb/common/sorting/hashed_sort_group_scan.hpp"
 #include "duckdb/common/sorting/sorted_run.hpp"
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/parallel/thread_context.hpp"
@@ -568,6 +569,69 @@ unique_ptr<GlobalSourceState> HashedSort::GetGlobalSourceState(ClientContext &cl
 const HashedSort::ChunkRows &HashedSort::GetHashGroups(GlobalSourceState &gstate) const {
 	auto &gsource = gstate.Cast<HashedSortGlobalSourceState>();
 	return gsource.chunk_rows;
+}
+
+//===--------------------------------------------------------------------===//
+// HashedSortGroupScan
+//===--------------------------------------------------------------------===//
+struct HashedSortGroupScan::Impl {
+	Impl(Sort &sort_p, ExecutionContext &context_p, InterruptState &interrupt_state_p, GlobalSourceState &sort_source_p)
+	    : sort(sort_p), context(context_p), interrupt_state(interrupt_state_p),
+	      sort_local(sort.GetLocalSourceState(context, sort_source_p)) {
+	}
+
+	Sort &sort;
+	ExecutionContext &context;
+	InterruptState &interrupt_state;
+	unique_ptr<GlobalSourceState> sort_source;
+	unique_ptr<LocalSourceState> sort_local;
+};
+
+HashedSortGroupScan::HashedSortGroupScan() {
+}
+
+HashedSortGroupScan::~HashedSortGroupScan() {
+}
+
+SourceResultType HashedSortGroupScan::GetData(DataChunk &chunk) {
+	OperatorSourceInput input {*impl->sort_source, *impl->sort_local, impl->interrupt_state};
+	return impl->sort.GetData(impl->context, chunk, input);
+}
+
+unique_ptr<HashedSortGroupScan> CreateHashedSortGroupScan(const HashedSort &hashed_sort, ExecutionContext &context,
+                                                          hash_t hash_bin, GlobalSourceState &global_source,
+                                                          InterruptState &interrupt_state) {
+	auto &gsource = global_source.Cast<HashedSortGlobalSourceState>();
+	auto &gsink = gsource.gsink;
+	if (&gsink.hashed_sort != &hashed_sort) {
+		throw InvalidInputException("Cannot scan a HashedSort group using state from a different HashedSort");
+	}
+	if (hash_bin >= gsink.hash_groups.size() || !gsink.hash_groups[hash_bin]) {
+		throw InvalidInputException("Cannot scan HashedSort group %llu: group is absent", hash_bin);
+	}
+
+	auto &hash_group = *gsink.hash_groups[hash_bin];
+	lock_guard<mutex> scan_guard(hash_group.scan_lock);
+	if (!gsink.grouping_data) {
+		throw InvalidInputException("Cannot scan HashedSort group %llu: group is absent", hash_bin);
+	}
+	auto &partitions = gsink.grouping_data->GetPartitions();
+	if (hash_bin >= partitions.size()) {
+		throw InvalidInputException("Cannot scan HashedSort group %llu: group is absent", hash_bin);
+	}
+	if (!partitions[hash_bin]) {
+		throw InvalidInputException("Cannot scan HashedSort group %llu: group was already claimed", hash_bin);
+	}
+	if (!hash_group.sort_source || hash_group.count != partitions[hash_bin]->Count()) {
+		throw InvalidInputException("Cannot scan HashedSort group %llu: group is not finalized", hash_bin);
+	}
+
+	auto result = unique_ptr<HashedSortGroupScan>(new HashedSortGroupScan());
+	result->impl =
+	    make_uniq<HashedSortGroupScan::Impl>(hash_group.sort, context, interrupt_state, *hash_group.sort_source);
+	result->impl->sort_source = std::move(hash_group.sort_source);
+	partitions[hash_bin].reset();
+	return result;
 }
 
 static SourceResultType MaterializeHashGroupData(ExecutionContext &context, idx_t hash_bin, bool build_runs,
