@@ -99,6 +99,7 @@ public:
 	// Non-Standard Interface
 	//===--------------------------------------------------------------------===//
 	void DestroySource(GlobalSourceState &global_state, LocalSourceState &local_state) const;
+	void SetSourceMaxThreads(GlobalSourceState &global_state, idx_t max_threads) const;
 	SourceResultType MaterializeColumnData(ExecutionContext &context, OperatorSourceInput &input) const;
 	unique_ptr<ColumnDataCollection> GetColumnData(OperatorSourceInput &input) const;
 

@@ -576,8 +576,9 @@ const HashedSort::ChunkRows &HashedSort::GetHashGroups(GlobalSourceState &gstate
 //===--------------------------------------------------------------------===//
 struct HashedSortGroupScan::Impl {
 	Impl(Sort &sort_p, ExecutionContext &context_p, InterruptState &interrupt_state_p, GlobalSourceState &sort_source_p)
-	    : sort(sort_p), context(context_p), interrupt_state(interrupt_state_p),
-	      sort_local(sort.GetLocalSourceState(context, sort_source_p)) {
+	    : sort(sort_p), context(context_p), interrupt_state(interrupt_state_p) {
+		sort.SetSourceMaxThreads(sort_source_p, 1);
+		sort_local = sort.GetLocalSourceState(context, sort_source_p);
 	}
 	~Impl() noexcept {
 		DestroyNoThrow();

@@ -197,7 +197,7 @@ public:
 	}
 
 	idx_t MaxThreads() override {
-		return MaxValue<idx_t>(num_partitions, 1);
+		return MinValue<idx_t>(MaxValue<idx_t>(num_partitions, 1), num_threads);
 	}
 
 	void DestroyScannedData() {
@@ -272,7 +272,7 @@ private:
 
 public:
 	ClientContext &context;
-	const idx_t num_threads;
+	idx_t num_threads;
 
 	const SortedRunMerger &merger;
 	const idx_t num_runs;
@@ -851,6 +851,15 @@ unique_ptr<LocalSourceState> SortedRunMerger::GetLocalSourceState(ExecutionConte
 
 unique_ptr<GlobalSourceState> SortedRunMerger::GetGlobalSourceState(ClientContext &context) const {
 	return make_uniq<SortedRunMergerGlobalState>(context, *this);
+}
+
+void SortedRunMerger::SetMaxThreads(GlobalSourceState &gstate_p, idx_t max_threads) const {
+	auto &gstate = gstate_p.Cast<SortedRunMergerGlobalState>();
+	auto guard = gstate.Lock();
+	if (gstate.next_partition_idx != 0) {
+		throw InvalidInputException("Cannot configure sort source threads after scanning has started");
+	}
+	gstate.num_threads = MaxValue<idx_t>(max_threads, 1);
 }
 
 SourceResultType SortedRunMerger::GetData(ExecutionContext &, DataChunk &chunk, OperatorSourceInput &input) const {

@@ -35,6 +35,7 @@ public:
 	//===--------------------------------------------------------------------===//
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context, GlobalSourceState &gstate) const;
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const;
+	void SetMaxThreads(GlobalSourceState &gstate, idx_t max_threads) const;
 	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const;
 	OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
 	                                       LocalSourceState &lstate, const OperatorPartitionInfo &partition_info) const;

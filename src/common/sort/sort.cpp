@@ -452,6 +452,13 @@ void Sort::DestroySource(GlobalSourceState &global_state, LocalSourceState &loca
 	global_state.Cast<SortGlobalSourceState>().Destroy();
 }
 
+void Sort::SetSourceMaxThreads(GlobalSourceState &global_state, idx_t max_threads) const {
+	auto &gstate = global_state.Cast<SortGlobalSourceState>();
+	if (gstate.merger_global_state) {
+		gstate.merger.SetMaxThreads(*gstate.merger_global_state, max_threads);
+	}
+}
+
 SourceResultType Sort::MaterializeColumnData(ExecutionContext &context, OperatorSourceInput &input) const {
 	auto &gstate = input.global_state.Cast<SortGlobalSourceState>();
 
