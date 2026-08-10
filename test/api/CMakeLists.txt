@@ -18,6 +18,7 @@ set(TEST_API_OBJECTS
     test_storage_extension_alias.cpp
     test_results.cpp
     test_reset.cpp
+    test_hashed_sort_eager.cpp
     test_sort_source_max_threads.cpp
     test_get_table_names.cpp
     test_prepared_api.cpp

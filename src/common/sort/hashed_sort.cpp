@@ -1,4 +1,5 @@
 #include "duckdb/common/sorting/hashed_sort.hpp"
+#include "duckdb/common/sorting/hashed_sort_eager.hpp"
 #include "duckdb/common/sorting/hashed_sort_group_scan.hpp"
 #include "duckdb/common/sorting/sorted_run.hpp"
 #include "duckdb/common/radix_partitioning.hpp"
@@ -29,10 +30,11 @@ public:
 	TupleDataParallelScanState parallel_scan;
 	atomic<idx_t> tasks_completed;
 	unique_ptr<GlobalSourceState> sort_source;
+	bool eager_source_claimed;
 };
 
 HashedSortGroup::HashedSortGroup(ClientContext &client, Sort &sort, idx_t group_idx)
-    : group_idx(group_idx), count(0), sort(sort), tasks_completed(0) {
+    : group_idx(group_idx), count(0), sort(sort), tasks_completed(0), eager_source_claimed(false) {
 	sort_global = sort.GetGlobalSinkState(client);
 }
 
@@ -48,18 +50,21 @@ public:
 	using GroupingPartition = unique_ptr<RadixPartitionedTupleData>;
 	using GroupingAppend = unique_ptr<PartitionedTupleDataAppendState>;
 
-	HashedSortGlobalSinkState(ClientContext &client, const HashedSort &hashed_sort);
+	HashedSortGlobalSinkState(ClientContext &client, const HashedSort &hashed_sort, bool eager_sort = false);
 
 	// OVER(PARTITION BY...) (hash grouping)
 	unique_ptr<RadixPartitionedTupleData> CreatePartition(idx_t new_bits) const;
 	void SyncPartitioning(const HashedSortGlobalSinkState &other);
 	void UpdateLocalPartition(GroupingPartition &local_partition, GroupingAppend &partition_append);
 	void CombineLocalPartition(GroupingPartition &local_partition, GroupingAppend &local_append);
+	void CombineLocalPartitionEager(ExecutionContext &context, GroupingPartition &local_partition,
+	                                GroupingAppend &local_append, InterruptState &interrupt_state);
 	ProgressData GetSinkProgress(ClientContext &context, const ProgressData source_progress) const;
 
 	//! System and query state
 	ClientContext &client;
 	const HashedSort &hashed_sort;
+	const bool eager_sort;
 	BufferManager &buffer_manager;
 	Allocator &allocator;
 	mutable mutex lock;
@@ -83,9 +88,11 @@ private:
 	void SyncLocalPartition(GroupingPartition &local_partition, GroupingAppend &local_append);
 };
 
-HashedSortGlobalSinkState::HashedSortGlobalSinkState(ClientContext &client, const HashedSort &hashed_sort)
-    : client(client), hashed_sort(hashed_sort), buffer_manager(BufferManager::GetBufferManager(client)),
-      allocator(Allocator::Get(client)), fixed_bits(0), max_bits(1), count(0) {
+HashedSortGlobalSinkState::HashedSortGlobalSinkState(ClientContext &client, const HashedSort &hashed_sort,
+                                                     bool eager_sort)
+    : client(client), hashed_sort(hashed_sort), eager_sort(eager_sort),
+      buffer_manager(BufferManager::GetBufferManager(client)), allocator(Allocator::Get(client)), fixed_bits(0),
+      max_bits(1), count(0) {
 	const auto memory_per_thread = PhysicalOperator::GetMaxThreadMemory(client);
 	const auto thread_pages = PreviousPowerOfTwo(memory_per_thread / (4 * buffer_manager.GetBlockAllocSize()));
 	while (max_bits < 8 && (thread_pages >> max_bits) > 1) {
@@ -207,6 +214,65 @@ void HashedSortGlobalSinkState::CombineLocalPartition(GroupingPartition &local_p
 	grouping_data->Combine(*local_partition);
 }
 
+void HashedSortGlobalSinkState::CombineLocalPartitionEager(ExecutionContext &context,
+                                                           GroupingPartition &local_partition,
+                                                           GroupingAppend &local_append,
+                                                           InterruptState &interrupt_state) {
+	if (!local_partition) {
+		return;
+	}
+	local_partition->FlushAppendState(*local_append);
+
+	{
+		// Freeze the radix layout and construct each shared Sort state exactly once. Scanning and sorting are kept
+		// outside this lock so other local states can finish combining concurrently.
+		lock_guard<mutex> guard(lock);
+		SyncLocalPartition(local_partition, local_append);
+		fixed_bits = true;
+
+		auto &groups = local_partition->GetPartitions();
+		if (hash_groups.empty()) {
+			hash_groups.resize(groups.size());
+		}
+		D_ASSERT(hash_groups.size() == groups.size());
+		for (idx_t group_idx = 0; group_idx < groups.size(); ++group_idx) {
+			if (!groups[group_idx]->Count() || hash_groups[group_idx]) {
+				continue;
+			}
+			hash_groups[group_idx] = make_uniq<HashedSortGroup>(client, *hashed_sort.sort, group_idx);
+		}
+	}
+
+	auto &groups = local_partition->GetPartitions();
+	for (idx_t group_idx = 0; group_idx < groups.size(); ++group_idx) {
+		auto &group_data = *groups[group_idx];
+		if (!group_data.Count()) {
+			continue;
+		}
+
+		auto &hash_group = *hash_groups[group_idx];
+		TupleDataScanState scan_state;
+		group_data.InitializeScan(scan_state, hashed_sort.partition_ids, TupleDataPinProperties::DESTROY_AFTER_DONE);
+		DataChunk chunk;
+		group_data.InitializeScanChunk(scan_state, chunk);
+		auto sort_local = hashed_sort.sort->GetLocalSinkState(context);
+		OperatorSinkInput sink {*hash_group.sort_global, *sort_local, interrupt_state};
+		idx_t combined = 0;
+		while (group_data.Scan(scan_state, chunk)) {
+			hashed_sort.sort->Sink(context, chunk, sink);
+			combined += chunk.size();
+		}
+
+		OperatorSinkCombineInput combine {*hash_group.sort_global, *sort_local, interrupt_state};
+		hashed_sort.sort->Combine(context, combine);
+		hash_group.count += combined;
+		group_data.Reset();
+	}
+
+	local_append.reset();
+	local_partition.reset();
+}
+
 ProgressData HashedSortGlobalSinkState::GetSinkProgress(ClientContext &client, const ProgressData source) const {
 	ProgressData result;
 	result.done = source.done / 2;
@@ -237,6 +303,20 @@ SinkFinalizeType HashedSort::Finalize(ClientContext &client, OperatorSinkFinaliz
 	//	Did we get any data?
 	if (!gsink.count) {
 		return SinkFinalizeType::NO_OUTPUT_POSSIBLE;
+	}
+	if (gsink.eager_sort) {
+		for (auto &hash_group : gsink.hash_groups) {
+			if (!hash_group || !hash_group->count) {
+				continue;
+			}
+
+			OperatorSinkFinalizeInput sort_finalize {*hash_group->sort_global, finalize.interrupt_state};
+			hash_group->sort.Finalize(client, sort_finalize);
+			auto sort_source = hash_group->sort.GetGlobalSourceState(client, *hash_group->sort_global);
+			lock_guard<mutex> scan_guard(hash_group->scan_lock);
+			hash_group->sort_source = std::move(sort_source);
+		}
+		return SinkFinalizeType::READY;
 	}
 
 	// OVER(PARTITION BY...)
@@ -401,13 +481,20 @@ SinkCombineResultType HashedSort::Combine(ExecutionContext &context, OperatorSin
 
 	// Flush our data and lock the bit count
 	auto &grouping_append = lstate.grouping_append;
-	gstate.CombineLocalPartition(local_grouping, grouping_append);
+	if (gstate.eager_sort) {
+		gstate.CombineLocalPartitionEager(context, local_grouping, grouping_append, combine.interrupt_state);
+	} else {
+		gstate.CombineLocalPartition(local_grouping, grouping_append);
+	}
 
 	return SinkCombineResultType::FINISHED;
 }
 
 void HashedSort::SortColumnData(ExecutionContext &context, hash_t hash_bin, OperatorSinkFinalizeInput &finalize) {
 	auto &gstate = finalize.global_state.Cast<HashedSortGlobalSinkState>();
+	if (gstate.eager_sort) {
+		return;
+	}
 
 	//	Loop over the partitions and add them to each hash group's global sort state
 	auto &partitions = gstate.grouping_data->GetPartitions();
@@ -466,6 +553,17 @@ public:
 HashedSortGlobalSourceState::HashedSortGlobalSourceState(ClientContext &client, HashedSortGlobalSinkState &gsink)
     : gsink(gsink) {
 	if (!gsink.count) {
+		return;
+	}
+	if (gsink.eager_sort) {
+		for (auto &hash_group : gsink.hash_groups) {
+			ChunkRow chunk_row;
+			if (hash_group) {
+				chunk_row.count = hash_group->count;
+				chunk_row.chunks = (chunk_row.count + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+			}
+			chunk_rows.emplace_back(chunk_row);
+		}
 		return;
 	}
 
@@ -558,6 +656,10 @@ unique_ptr<GlobalSinkState> HashedSort::GetGlobalSinkState(ClientContext &client
 	return make_uniq<HashedSortGlobalSinkState>(client, *this);
 }
 
+unique_ptr<GlobalSinkState> CreateEagerHashedSortSinkState(const HashedSort &hashed_sort, ClientContext &client) {
+	return make_uniq<HashedSortGlobalSinkState>(client, hashed_sort, true);
+}
+
 unique_ptr<LocalSinkState> HashedSort::GetLocalSinkState(ExecutionContext &context) const {
 	return make_uniq<HashedSortLocalSinkState>(context, *this);
 }
@@ -641,6 +743,21 @@ unique_ptr<HashedSortGroupScan> CreateHashedSortGroupScan(const HashedSort &hash
 
 	auto &hash_group = *gsink.hash_groups[hash_bin];
 	lock_guard<mutex> scan_guard(hash_group.scan_lock);
+	if (gsink.eager_sort) {
+		if (hash_group.eager_source_claimed) {
+			throw InvalidInputException("Cannot scan HashedSort group %llu: group was already claimed", hash_bin);
+		}
+		if (!hash_group.sort_source) {
+			throw InvalidInputException("Cannot scan HashedSort group %llu: group is not finalized", hash_bin);
+		}
+
+		auto result = unique_ptr<HashedSortGroupScan>(new HashedSortGroupScan());
+		result->impl =
+		    make_uniq<HashedSortGroupScan::Impl>(hash_group.sort, context, interrupt_state, *hash_group.sort_source);
+		result->impl->sort_source = std::move(hash_group.sort_source);
+		hash_group.eager_source_claimed = true;
+		return result;
+	}
 	if (!gsink.grouping_data) {
 		throw InvalidInputException("Cannot scan HashedSort group %llu: group is absent", hash_bin);
 	}
@@ -667,6 +784,9 @@ static SourceResultType MaterializeHashGroupData(ExecutionContext &context, idx_
                                                  OperatorSourceInput &source) {
 	auto &gsource = source.global_state.Cast<HashedSortGlobalSourceState>();
 	auto &gsink = gsource.gsink;
+	if (gsink.eager_sort) {
+		throw InvalidInputException("Eager HashedSort state must be consumed with CreateHashedSortGroupScan");
+	}
 	auto &hash_group = *gsink.hash_groups[hash_bin];
 
 	//	OVER(PARTITION BY...)
@@ -699,6 +819,9 @@ SourceResultType HashedSort::MaterializeColumnData(ExecutionContext &execution, 
 HashedSort::HashGroupPtr HashedSort::GetColumnData(idx_t hash_bin, OperatorSourceInput &source) const {
 	auto &gsource = source.global_state.Cast<HashedSortGlobalSourceState>();
 	auto &gsink = gsource.gsink;
+	if (gsink.eager_sort) {
+		throw InvalidInputException("Eager HashedSort state must be consumed with CreateHashedSortGroupScan");
+	}
 	auto &hash_group = *gsink.hash_groups[hash_bin];
 
 	auto &sort = hash_group.sort;
@@ -726,6 +849,9 @@ HashedSort::SortedRunPtr HashedSort::GetSortedRun(ClientContext &client, idx_t h
                                                   OperatorSourceInput &source) const {
 	auto &gsource = source.global_state.Cast<HashedSortGlobalSourceState>();
 	auto &gsink = gsource.gsink;
+	if (gsink.eager_sort) {
+		throw InvalidInputException("Eager HashedSort state must be consumed with CreateHashedSortGroupScan");
+	}
 	auto &hash_group = *gsink.hash_groups[hash_bin];
 
 	auto &sort = hash_group.sort;
