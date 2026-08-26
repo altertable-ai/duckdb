@@ -26,8 +26,8 @@ unique_ptr<FunctionData> SystemCatalogScanFunction::Bind() {
 	return make_uniq<SystemCatalogScanBindData>();
 }
 
-vector<reference<SchemaCatalogEntry>> SystemCatalogScanFunction::GetSchemas(ClientContext &context,
-                                                                            optional_ptr<const FunctionData> bind_data) {
+vector<reference<SchemaCatalogEntry>>
+SystemCatalogScanFunction::GetSchemas(ClientContext &context, optional_ptr<const FunctionData> bind_data) {
 	if (!bind_data) {
 		return Catalog::GetAllSchemas(context);
 	}
@@ -88,7 +88,7 @@ static bool TryExtractDatabaseNameEquality(const LogicalGet &get, const Expressi
 		return false;
 	}
 	catalog = StringValue::Get(constant->value);
-	return true;
+	return !catalog.empty();
 }
 
 void SystemCatalogScanFunction::PushdownComplexFilter(ClientContext &, LogicalGet &get, FunctionData *bind_data,

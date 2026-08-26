@@ -23,8 +23,7 @@ static int64_t QueryCount(Connection &con, const string &query) {
 	return result->GetValue(0, 0).GetValue<int64_t>();
 }
 
-TEST_CASE("Metadata functions push a literal database name into the catalog scan",
-          "[optimizer][filter_pushdown]") {
+TEST_CASE("Metadata functions push a literal database name into the catalog scan", "[optimizer][filter_pushdown]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 
@@ -43,6 +42,8 @@ TEST_CASE("Metadata functions push a literal database name into the catalog scan
 		    ExplainOptimized(con, StringUtil::Format("SELECT * FROM %s() WHERE database_name = 'db1'", function));
 		REQUIRE(StringUtil::Contains(plan, "Catalog: db1"));
 		REQUIRE_FALSE(StringUtil::Contains(plan, "database_name = 'db1'"));
+		auto empty_name_query = StringUtil::Format("SELECT count(*) FROM %s() WHERE database_name = ''", function);
+		REQUIRE(QueryCount(con, empty_name_query) == 0);
 	}
 
 	auto reversed = ExplainOptimized(con, "SELECT * FROM duckdb_schemas() WHERE 'db1' = database_name");
