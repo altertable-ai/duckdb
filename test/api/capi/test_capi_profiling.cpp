@@ -3,6 +3,11 @@
 using namespace duckdb;
 using namespace std;
 
+extern "C" {
+DUCKDB_C_API duckdb_profiling_info duckdb_get_profiling_info_snapshot(duckdb_connection connection);
+DUCKDB_C_API void duckdb_destroy_profiling_info_snapshot(duckdb_profiling_info *info);
+}
+
 string BuildSettingsString(const duckdb::vector<string> &settings) {
 	string result = "'{";
 	for (idx_t i = 0; i < settings.size(); i++) {
@@ -128,6 +133,47 @@ TEST_CASE("Test profiling with a single metric and get_value", "[capi]") {
 
 	TraverseTree(info, cumulative_counter, cumulative_result, 0);
 	tester.Cleanup();
+}
+
+TEST_CASE("Take an owned profiling snapshot during streaming", "[capi]") {
+	CAPITester tester;
+	REQUIRE(tester.OpenDatabase(nullptr));
+	REQUIRE_NO_FAIL(tester.Query("SET threads = 4"));
+	REQUIRE_NO_FAIL(tester.Query("PRAGMA enable_profiling = 'no_output'"));
+	REQUIRE_NO_FAIL(
+	    tester.Query("PRAGMA custom_profiling_settings = '{\"EXTRA_INFO\": \"true\", \"OPERATOR_NAME\": \"true\"}'"));
+
+	duckdb_prepared_statement prepared = nullptr;
+	REQUIRE(duckdb_prepare(tester.connection, "SELECT range FROM range(10000000)", &prepared) == DuckDBSuccess);
+
+	duckdb_result result;
+	REQUIRE(duckdb_execute_prepared_streaming(prepared, &result) == DuckDBSuccess);
+	REQUIRE(duckdb_result_is_streaming(result));
+
+	auto chunk = duckdb_stream_fetch_chunk(result);
+	REQUIRE(chunk);
+	idx_t row_count = duckdb_data_chunk_get_size(chunk);
+	duckdb_destroy_data_chunk(&chunk);
+
+	auto snapshot = duckdb_get_profiling_info_snapshot(tester.connection);
+	REQUIRE(snapshot);
+
+	while ((chunk = duckdb_stream_fetch_chunk(result))) {
+		row_count += duckdb_data_chunk_get_size(chunk);
+		duckdb_destroy_data_chunk(&chunk);
+	}
+	REQUIRE(row_count == 10000000);
+
+	duckdb_destroy_result(&result);
+	duckdb_destroy_prepare(&prepared);
+	REQUIRE_NO_FAIL(tester.Query("SELECT 42"));
+
+	duckdb::map<string, double> cumulative_counter;
+	duckdb::map<string, double> cumulative_result;
+	TraverseTree(snapshot, cumulative_counter, cumulative_result, 0);
+
+	duckdb_destroy_profiling_info_snapshot(&snapshot);
+	REQUIRE(!snapshot);
 }
 
 TEST_CASE("Test profiling with cumulative metrics", "[capi]") {
