@@ -7,6 +7,16 @@ using duckdb::MetricType;
 using duckdb::optional_ptr;
 using duckdb::ProfilingNode;
 
+static duckdb::unique_ptr<ProfilingNode> CopyProfilingNode(const ProfilingNode &node) {
+	auto result = duckdb::make_uniq<ProfilingNode>();
+	result->depth = node.depth;
+	result->GetProfilingInfo() = node.GetProfilingInfo();
+	for (const auto &child : node.children) {
+		result->AddChild(CopyProfilingNode(*child));
+	}
+	return result;
+}
+
 duckdb_profiling_info duckdb_get_profiling_info(duckdb_connection connection) {
 	if (!connection) {
 		return nullptr;
@@ -23,6 +33,38 @@ duckdb_profiling_info duckdb_get_profiling_info(duckdb_connection connection) {
 		return nullptr;
 	}
 	return reinterpret_cast<duckdb_profiling_info>(profiling_node.get());
+}
+
+extern "C" DUCKDB_C_API duckdb_profiling_info duckdb_get_profiling_info_snapshot(duckdb_connection connection) {
+	if (!connection) {
+		return nullptr;
+	}
+
+	auto conn = reinterpret_cast<Connection *>(connection);
+	duckdb::unique_ptr<ProfilingNode> snapshot;
+	try {
+		auto &profiler = duckdb::QueryProfiler::Get(*conn->context);
+		if (!profiler.IsEnabled()) {
+			return nullptr;
+		}
+		profiler.GetRootUnderLock([&snapshot](optional_ptr<ProfilingNode> root) {
+			if (root) {
+				snapshot = CopyProfilingNode(*root);
+			}
+		});
+	} catch (std::exception &ex) {
+		return nullptr;
+	}
+
+	return reinterpret_cast<duckdb_profiling_info>(snapshot.release());
+}
+
+extern "C" DUCKDB_C_API void duckdb_destroy_profiling_info_snapshot(duckdb_profiling_info *info) {
+	if (!info || !*info) {
+		return;
+	}
+	delete reinterpret_cast<ProfilingNode *>(*info);
+	*info = nullptr;
 }
 
 duckdb_value duckdb_profiling_info_get_value(duckdb_profiling_info info, const char *key) {
