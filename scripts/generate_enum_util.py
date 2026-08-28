@@ -196,7 +196,8 @@ with open(enum_util_header_file, "w") as f:
 
     f.write("namespace duckdb {\n\n")
 
-    f.write("""struct EnumUtil {
+    f.write(
+        """struct EnumUtil {
     // String -> Enum
     template <class T>
     static T FromString(const char *value) = delete;
@@ -210,7 +211,8 @@ with open(enum_util_header_file, "w") as f:
 
     template <class T>
     static string ToString(T value) { return string(ToChars<T>(value)); }
-};\n\n""")
+};\n\n"""
+    )
 
     # Forward declare all enums
     for enum_name, enum_type, _ in enums:
