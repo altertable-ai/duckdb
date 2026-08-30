@@ -106,3 +106,25 @@ query II
 EXPLAIN ANALYZE SELECT 42;
 ----
 analyzed_plan	<REGEX>:.+EXPLAIN_ANALYZE.*
+
+# EXPLAIN ANALYZE always uses default metrics, even if custom_profiling_settings is empty
+statement ok
+PRAGMA custom_profiling_settings='{}'
+
+query II
+EXPLAIN ANALYZE SELECT SUM(i) FROM integers
+----
+analyzed_plan	<REGEX>:.*integers.*
+
+query II
+EXPLAIN (ANALYZE, FORMAT JSON) SELECT SUM(i) FROM integers;
+----
+analyzed_plan	<REGEX>:.*"query_name": ".*SELECT SUM\(i\) FROM integers.*".*
+
+query II
+EXPLAIN (ANALYZE, FORMAT JSON) SELECT SUM(i) FROM integers;
+----
+analyzed_plan	<REGEX>:.*"operator_timing".*
+
+statement ok
+RESET custom_profiling_settings;

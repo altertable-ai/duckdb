@@ -322,9 +322,17 @@ void QueryProfiler::EndPhase() {
 	}
 }
 
+profiler_settings_t QueryProfiler::GetProfilerSettings() const {
+	if (is_explain_analyze) {
+		return MetricsUtils::GetDefaultMetrics();
+	}
+	return ClientConfig::GetConfig(context).profiler_settings;
+}
+
 OperatorProfiler::OperatorProfiler(ClientContext &context) : context(context) {
-	enabled = QueryProfiler::Get(context).IsEnabled();
-	auto &context_metrics = ClientConfig::GetConfig(context).profiler_settings;
+	auto &profiler = QueryProfiler::Get(context);
+	enabled = profiler.IsEnabled();
+	auto context_metrics = profiler.GetProfilerSettings();
 
 	// Expand.
 	for (const auto metric : context_metrics) {
@@ -962,8 +970,7 @@ void QueryProfiler::Initialize(const PhysicalOperator &root_op) {
 		return;
 	}
 	query_requires_profiling = false;
-	ClientConfig &config = ClientConfig::GetConfig(context);
-	root = CreateTree(root_op, config.profiler_settings, 0);
+	root = CreateTree(root_op, GetProfilerSettings(), 0);
 	if (!query_requires_profiling) {
 		// query does not require profiling: disable profiling for this query
 		running = false;

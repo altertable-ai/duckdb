@@ -135,6 +135,8 @@ private:
 
 //! QueryProfiler collects the profiling metrics of a query.
 class QueryProfiler {
+	friend class OperatorProfiler; // work-around to avoid breaking the ABI
+
 public:
 	using TreeMap = reference_map_t<const PhysicalOperator, reference<ProfilingNode>>;
 
@@ -260,6 +262,8 @@ private:
 private:
 	void MoveOptimizerPhasesToRoot();
 	void FinalizeMetricsInternal();
+	//! EXPLAIN ANALYZE always uses default metrics, not custom_profiling_settings.
+	profiler_settings_t GetProfilerSettings() const;
 
 	//! Check whether or not an operator type requires query profiling. If none of the ops in a query require profiling
 	//! no profiling information is output.
