@@ -225,6 +225,8 @@ public:
 
 private:
 	void FinalizeMetricsInternal();
+	//! EXPLAIN ANALYZE always uses the default metric set, not the session tracked_metrics.
+	vector<string> GetTrackedMetrics() const;
 	//! Write metrics to log without acquiring the lock (must be called with lock held).
 	void ToLogInternal() const;
 
