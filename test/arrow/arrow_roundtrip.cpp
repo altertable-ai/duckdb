@@ -58,6 +58,23 @@ TEST_CASE("Test Export Large", "[arrow]") {
 	TestArrowRoundtrip("SELECT '3d038406-6275-4aae-bec1-1235ccdeaade'::UUID FROM range(10000) tbl(i)", true, true);
 }
 
+static void TestVariantArrowRoundtrip(const string &query) {
+	DuckDB db;
+	Connection con(db);
+	auto load = con.Query("LOAD parquet");
+	REQUIRE(!load->HasError());
+	REQUIRE(ArrowTestHelper::RunArrowComparison(con, query, true));
+	REQUIRE(ArrowTestHelper::RunArrowComparison(con, query, false));
+}
+
+TEST_CASE("Test VARIANT arrow.parquet.variant roundtrip", "[arrow][variant]") {
+	TestVariantArrowRoundtrip("SELECT 42::VARIANT");
+	TestVariantArrowRoundtrip("SELECT 'hello'::VARIANT");
+	TestVariantArrowRoundtrip("SELECT NULL::VARIANT");
+	TestVariantArrowRoundtrip("SELECT {'a': 1, 'b': [1, 2, 3]}::VARIANT");
+	TestVariantArrowRoundtrip("SELECT CASE WHEN i%2=0 THEN NULL ELSE {'i': i}::VARIANT END FROM range(10) tbl(i)");
+}
+
 TEST_CASE("Test arrow roundtrip", "[arrow]") {
 	TestArrowRoundtrip("SELECT * FROM range(10000) tbl(i) UNION ALL SELECT NULL");
 	TestArrowRoundtrip("SELECT m from (select MAP(list_value(1), list_value(2)) from range(5) tbl(i)) tbl(m)");

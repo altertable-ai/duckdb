@@ -29,6 +29,7 @@ set(PARQUET_EXTENSION_FILES
     parquet_field_id.cpp
     parquet_statistics.cpp
     parquet_timestamp.cpp
+    variant_arrow_capi.cpp
     parquet_writer.cpp
     parquet_shredding.cpp
     parquet_column_schema.cpp

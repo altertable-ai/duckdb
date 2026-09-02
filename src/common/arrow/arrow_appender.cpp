@@ -115,7 +115,10 @@ ArrowArray ArrowAppender::Finalize() {
 	root_holder->child_data = std::move(root_data);
 
 	for (idx_t i = 0; i < root_holder->child_data.size(); i++) {
-		root_holder->child_arrays[i] = *ArrowAppender::FinalizeChild(types[i], std::move(root_holder->child_data[i]));
+		auto &child_data = root_holder->child_data[i];
+		const LogicalType child_type =
+		    child_data->extension_data ? child_data->extension_data->GetInternalType() : types[i];
+		root_holder->child_arrays[i] = *ArrowAppender::FinalizeChild(child_type, std::move(child_data));
 	}
 
 	// Release ownership to caller

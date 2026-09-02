@@ -72,6 +72,8 @@ struct QueryProfileResult {
 	bool IsNested() const {
 		return kind == QueryProfileResultKind::OBJECT || kind == QueryProfileResultKind::LIST;
 	}
+	//! Deep-copy this node and its children.
+	unique_ptr<QueryProfileResult> Copy() const;
 };
 
 //! QueryProfiler collects the profiling metrics of a query.
@@ -166,6 +168,8 @@ public:
 
 	//! Return the result tree (generating it if it does not yet exist)
 	QueryProfileResult &GetResult();
+	//! Copy the result tree under the profiler lock so it can outlive the next query.
+	unique_ptr<QueryProfileResult> CopyResult();
 	//! Returns true if the last query produced a profiling tree (i.e. profiling was enabled and the query succeeded)
 	bool HasRoot() const;
 
@@ -225,6 +229,8 @@ public:
 
 private:
 	void FinalizeMetricsInternal();
+	//! EXPLAIN ANALYZE always uses the default metric set, not the session tracked_metrics.
+	vector<string> GetTrackedMetrics() const;
 	//! Write metrics to log without acquiring the lock (must be called with lock held).
 	void ToLogInternal() const;
 

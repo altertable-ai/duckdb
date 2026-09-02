@@ -119,6 +119,9 @@ public:
 	VariantDecimalProperties GetDecimalProperties() const;
 	ParquetObjectIterator GetObjectChildren(VariantIterationOrder order) const;
 	ParquetArrayIterator GetArrayChildren() const;
+	//! Locate an OBJECT child by key without decoding sibling values. Returns MISSING when this
+	//! node is not an object or the key is absent.
+	ParquetVariantNode FindObjectChild(const string &key) const;
 
 private:
 	explicit ParquetVariantNode(Kind kind) : kind(kind) {
@@ -249,6 +252,10 @@ public:
 	//! Convert binary Variant values (each row being the metadata blob followed by the value blob) into the
 	//! canonical VARIANT 'result' in a single pass
 	static void ConvertBinary(Vector &metadata_and_value, Vector &result, idx_t count);
+	//! Walk 'path' in each row's binary OBJECT and materialize only that terminal subtree, wrapped
+	//! as a sparse object so a following variant_extract still resolves the same keys.
+	static void ConvertPath(Vector &metadata, Vector &group, Vector &result, idx_t count,
+	                        const vector<VariantPathComponent> &path);
 	//! 'variant_bytes_to_variant': decode a binary Variant value (metadata followed by value) into a VARIANT.
 	//! The inverse of 'variant_to_parquet_variant'.
 	static ScalarFunction GetBytesToVariantFunction();

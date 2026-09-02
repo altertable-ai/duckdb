@@ -1,0 +1,383 @@
+// Registers the `arrow.parquet.variant` canonical Arrow type extension so
+// VARIANT columns can cross the Arrow C interface. The conversion machinery
+// lives in the parquet extension, so these helper symbols are built there and
+// exported for clients that need explicit registration.
+//
+// Spec: https://arrow.apache.org/docs/format/CanonicalExtensions.html#parquet-variant
+
+#include "duckdb.h"
+#include "duckdb/common/arrow/arrow.hpp"
+#include "duckdb/common/arrow/arrow_converter.hpp"
+#include "duckdb/common/arrow/arrow_type_extension.hpp"
+#include "duckdb/common/arrow/schema_metadata.hpp"
+#include "duckdb/common/types/string_type.hpp"
+#include "duckdb/common/types/variant.hpp"
+#include "duckdb/common/types/variant_iterator.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/scalar_function.hpp"
+#include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
+#include "duckdb/main/capi/capi_internal.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "reader/variant/parquet_variant_iterator.hpp"
+#include "writer/variant_column_writer.hpp"
+#include "yyjson.hpp"
+
+#include <cstring>
+#include <cstdlib>
+
+namespace duckdb {
+
+namespace {
+
+using namespace duckdb_yyjson; // NOLINT
+
+constexpr const char *ARROW_PARQUET_VARIANT = "arrow.parquet.variant";
+
+LogicalType GetParquetVariantStructType() {
+	child_list_t<LogicalType> children;
+	children.emplace_back("metadata", LogicalType::BLOB);
+	children.emplace_back("value", LogicalType::BLOB);
+	return LogicalType::STRUCT(std::move(children));
+}
+
+unsafe_unique_array<char> AddSchemaName(const string &name) {
+	auto name_ptr = make_unsafe_uniq_array<char>(name.size() + 1);
+	for (idx_t i = 0; i < name.size(); i++) {
+		name_ptr[i] = name[i];
+	}
+	name_ptr[name.size()] = '\0';
+	return name_ptr;
+}
+
+void ReleaseVariantArrowSchema(ArrowSchema *schema) {
+	if (!schema || !schema->release) {
+		return;
+	}
+	schema->release = nullptr;
+	auto holder = static_cast<DuckDBArrowSchemaHolder *>(schema->private_data);
+	schema->private_data = nullptr;
+	delete holder;
+}
+
+void InitializeVariantArrowChild(ArrowSchema &child, DuckDBArrowSchemaHolder &root_holder, const string &name) {
+	child.private_data = nullptr;
+	child.release = ReleaseVariantArrowSchema;
+	child.flags = ARROW_FLAG_NULLABLE;
+	root_holder.owned_type_names.push_back(AddSchemaName(name));
+	child.name = root_holder.owned_type_names.back().get();
+	child.n_children = 0;
+	child.children = nullptr;
+	child.metadata = nullptr;
+	child.dictionary = nullptr;
+}
+
+string GetBinaryArrowFormat(const ClientProperties &options) {
+	if (options.arrow_output_version >= ArrowFormatVersion::V1_4) {
+		return "vz";
+	}
+	if (options.arrow_offset_size == ArrowOffsetSize::LARGE) {
+		return "Z";
+	}
+	return "z";
+}
+
+bool IsBinaryArrowFormat(const string &format) {
+	return format == "z" || format == "Z" || format == "vz";
+}
+
+void SetBinaryArrowFormat(DuckDBArrowSchemaHolder &root_holder, ArrowSchema &child, const string &format) {
+	root_holder.owned_type_names.push_back(AddSchemaName(format));
+	child.format = root_holder.owned_type_names.back().get();
+}
+
+void VariantToArrow(ClientContext &context, const Vector &source, Vector &result, idx_t count) {
+	if (source.GetVectorType() == VectorType::CONSTANT_VECTOR && ConstantVector::IsNull(source)) {
+		ConstantVector::SetNull(result, count);
+		return;
+	}
+
+	auto transform = VariantColumnWriter::GetTransformFunction();
+
+	vector<unique_ptr<Expression>> arguments;
+	arguments.push_back(make_uniq<BoundReferenceExpression>(LogicalType::VARIANT(), 0));
+
+	BoundScalarFunction bound_func(transform);
+	bound_func.SetReturnType(GetParquetVariantStructType());
+	auto expr = make_uniq<BoundFunctionExpression>(std::move(bound_func), std::move(arguments), nullptr);
+
+	DataChunk input;
+	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::VARIANT()}, count);
+	input.data[0].Reference(source);
+	input.SetCardinalityUnsafe(count);
+
+	ExpressionExecutor executor(context, *expr);
+	executor.ExecuteExpression(input, result);
+
+	UnifiedVectorFormat source_format;
+	source.ToUnifiedFormat(source_format);
+	if (!source_format.validity.CannotHaveNull()) {
+		result.Flatten();
+		for (idx_t i = 0; i < count; i++) {
+			if (!source_format.validity.RowIsValid(source_format.sel->get_index(i))) {
+				FlatVector::SetNull(result, i, true);
+			}
+		}
+	}
+}
+
+void ConcatenateMetadataAndValue(Vector &metadata, Vector &value, Vector &result, idx_t count) {
+	UnifiedVectorFormat metadata_format;
+	UnifiedVectorFormat value_format;
+	metadata.ToUnifiedFormat(metadata_format);
+	value.ToUnifiedFormat(value_format);
+	auto metadata_data = UnifiedVectorFormat::GetData<string_t>(metadata_format);
+	auto value_data = UnifiedVectorFormat::GetData<string_t>(value_format);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto metadata_idx = metadata_format.sel->get_index(i);
+		auto value_idx = value_format.sel->get_index(i);
+		if (!metadata_format.validity.RowIsValid(metadata_idx) || !value_format.validity.RowIsValid(value_idx)) {
+			FlatVector::SetNull(result, i, true);
+			continue;
+		}
+		auto &metadata_blob = metadata_data[metadata_idx];
+		auto &value_blob = value_data[value_idx];
+		const auto size = metadata_blob.GetSize() + value_blob.GetSize();
+		auto combined = StringVector::EmptyString(result, size);
+		memcpy(combined.GetDataWriteable(), metadata_blob.GetData(), metadata_blob.GetSize());
+		memcpy(combined.GetDataWriteable() + metadata_blob.GetSize(), value_blob.GetData(), value_blob.GetSize());
+		combined.Finalize();
+		result_data[i] = combined;
+	}
+}
+
+void ArrowToVariant(ClientContext &context, Vector &source, Vector &result, idx_t count) {
+	(void)context;
+	if (source.GetVectorType() == VectorType::CONSTANT_VECTOR && ConstantVector::IsNull(source)) {
+		ConstantVector::SetNull(result, count);
+		return;
+	}
+
+	auto &entries = StructVector::GetEntries(source);
+	auto &child_types = StructType::GetChildTypes(source.GetType());
+	if (child_types.size() != entries.size()) {
+		throw InternalException("Unexpected mismatch between arrow.parquet.variant struct fields and vectors");
+	}
+
+	optional_idx metadata_idx;
+	optional_idx value_idx;
+	for (idx_t child_idx = 0; child_idx < child_types.size(); child_idx++) {
+		auto &child_name = child_types[child_idx].first;
+		if (child_name == "metadata") {
+			metadata_idx = child_idx;
+		} else if (child_name == "value") {
+			value_idx = child_idx;
+		} else if (child_name == "typed_value") {
+			throw NotImplementedException("arrow.parquet.variant import does not support shredded typed_value yet");
+		}
+	}
+	if (!metadata_idx.IsValid() || !value_idx.IsValid()) {
+		throw InvalidInputException("arrow.parquet.variant storage type must contain 'metadata' and 'value' fields");
+	}
+
+	auto &metadata = entries[metadata_idx.GetIndex()];
+	auto &value = entries[value_idx.GetIndex()];
+
+	Vector combined(LogicalType::BLOB, count);
+	ConcatenateMetadataAndValue(metadata, value, combined, count);
+
+	UnifiedVectorFormat source_format;
+	source.ToUnifiedFormat(source_format);
+	if (!source_format.validity.CannotHaveNull()) {
+		for (idx_t i = 0; i < count; i++) {
+			if (!source_format.validity.RowIsValid(source_format.sel->get_index(i))) {
+				FlatVector::SetNull(combined, i, true);
+			}
+		}
+	}
+
+	ParquetVariantConversion::ConvertBinary(combined, result, count);
+}
+
+unique_ptr<ArrowType> GetVariantArrowType(ClientContext &context, const ArrowSchema &schema,
+                                          const ArrowSchemaMetadata &schema_metadata) {
+	const auto format = string(schema.format);
+	if (format != "+s") {
+		throw InvalidInputException("arrow.parquet.variant storage type must be a struct, got format '%s'",
+		                            format.c_str());
+	}
+	if (schema_metadata.GetOption(ArrowSchemaMetadata::ARROW_EXTENSION_NAME) != ARROW_PARQUET_VARIANT) {
+		throw InvalidInputException("Expected arrow extension '%s', got '%s'", ARROW_PARQUET_VARIANT,
+		                            schema_metadata.GetOption(ArrowSchemaMetadata::ARROW_EXTENSION_NAME).c_str());
+	}
+	if (schema.n_children < 2) {
+		throw InvalidInputException("arrow.parquet.variant storage type must contain at least 'metadata' and 'value'");
+	}
+
+	optional_idx metadata_idx;
+	optional_idx value_idx;
+	for (idx_t child_idx = 0; child_idx < NumericCast<idx_t>(schema.n_children); child_idx++) {
+		auto &child = *schema.children[child_idx];
+		auto child_name = string(child.name);
+		if (child_name == "metadata") {
+			metadata_idx = child_idx;
+		} else if (child_name == "value") {
+			value_idx = child_idx;
+		} else if (child_name == "typed_value") {
+			throw NotImplementedException("arrow.parquet.variant import does not support shredded typed_value yet");
+		}
+	}
+	if (!metadata_idx.IsValid() || !value_idx.IsValid()) {
+		throw InvalidInputException("arrow.parquet.variant storage type must contain 'metadata' and 'value' fields");
+	}
+	if (!IsBinaryArrowFormat(string(schema.children[metadata_idx.GetIndex()]->format)) ||
+	    !IsBinaryArrowFormat(string(schema.children[value_idx.GetIndex()]->format))) {
+		throw InvalidInputException("arrow.parquet.variant 'metadata' and 'value' fields must be binary types");
+	}
+
+	vector<shared_ptr<ArrowType>> children;
+	for (idx_t child_idx = 0; child_idx < NumericCast<idx_t>(schema.n_children); child_idx++) {
+		children.emplace_back(ArrowType::GetArrowLogicalType(context, *schema.children[child_idx]));
+	}
+	auto type_info = make_uniq<ArrowStructInfo>(std::move(children));
+	return make_uniq<ArrowType>(LogicalType::VARIANT(), std::move(type_info));
+}
+
+void PopulateVariantArrowSchema(DuckDBArrowSchemaHolder &root_holder, ArrowSchema &schema, const LogicalType &type,
+                                ClientContext &context, const ArrowTypeExtension &extension) {
+	(void)type;
+	(void)extension;
+	const ArrowSchemaMetadata schema_metadata = ArrowSchemaMetadata::ArrowCanonicalType(ARROW_PARQUET_VARIANT);
+	root_holder.metadata_info.emplace_back(schema_metadata.SerializeMetadata());
+	schema.metadata = root_holder.metadata_info.back().get();
+
+	const auto &options = context.GetClientProperties();
+	const auto binary_format = GetBinaryArrowFormat(options);
+
+	schema.format = "+s";
+	schema.n_children = 2;
+	root_holder.nested_children.emplace_back();
+	root_holder.nested_children.back().resize(2);
+	root_holder.nested_children_ptr.emplace_back();
+	root_holder.nested_children_ptr.back().resize(2);
+	for (idx_t child_idx = 0; child_idx < 2; child_idx++) {
+		root_holder.nested_children_ptr.back()[child_idx] = &root_holder.nested_children.back()[child_idx];
+	}
+	schema.children = &root_holder.nested_children_ptr.back()[0];
+
+	InitializeVariantArrowChild(*schema.children[0], root_holder, "metadata");
+	InitializeVariantArrowChild(*schema.children[1], root_holder, "value");
+	schema.children[0]->flags = 0;
+	SetBinaryArrowFormat(root_holder, *schema.children[0], binary_format);
+	SetBinaryArrowFormat(root_holder, *schema.children[1], binary_format);
+}
+
+string ParquetVariantBytesToJson(const_data_ptr_t metadata, idx_t metadata_len, const_data_ptr_t value,
+                                 idx_t value_len) {
+	Vector combined(LogicalType::BLOB, 1);
+	const auto size = metadata_len + value_len;
+	auto blob = StringVector::EmptyString(combined, size);
+	memcpy(blob.GetDataWriteable(), metadata, metadata_len);
+	memcpy(blob.GetDataWriteable() + metadata_len, value, value_len);
+	blob.Finalize();
+	FlatVector::GetDataMutable<string_t>(combined)[0] = blob;
+
+	Vector variant(LogicalType::VARIANT(), 1);
+	ParquetVariantConversion::ConvertBinary(combined, variant, 1);
+	if (FlatVector::IsNull(variant, 0)) {
+		return "null";
+	}
+
+	VariantIterator iterator(variant);
+	if (!iterator.RowIsValid(0)) {
+		return "null";
+	}
+	auto node = iterator.Root(0);
+	if (node.IsNull()) {
+		return "null";
+	}
+
+	auto doc = yyjson_mut_doc_new(nullptr);
+	auto json_val = VariantCasts::ConvertVariantToJSON(doc, node);
+	if (!json_val) {
+		yyjson_mut_doc_free(doc);
+		throw InternalException("Failed to convert VARIANT value to JSON");
+	}
+	size_t len = 0;
+	char *json_cstr = yyjson_mut_val_write_opts(json_val, 0, nullptr, &len, nullptr);
+	if (!json_cstr) {
+		yyjson_mut_doc_free(doc);
+		throw InternalException("Failed to serialize VARIANT value to JSON");
+	}
+	string result(json_cstr, len);
+	free(json_cstr);
+	yyjson_mut_doc_free(doc);
+	return result;
+}
+
+} // namespace
+
+void RegisterParquetVariantArrowExtension(DatabaseInstance &db_instance) {
+	auto &config = DBConfig::GetConfig(db_instance);
+	// Idempotent: skip if an extension (e.g. this one, via another
+	// connection to the same database) already registered VARIANT.
+	if (config.HasArrowExtension(LogicalType::VARIANT())) {
+		return;
+	}
+	config.RegisterArrowExtension(
+	    {ARROW_PARQUET_VARIANT, PopulateVariantArrowSchema, GetVariantArrowType,
+	     make_shared_ptr<ArrowTypeExtensionData>(LogicalType::VARIANT(), GetParquetVariantStructType(), ArrowToVariant,
+	                                             VariantToArrow)});
+}
+
+duckdb_state RegisterParquetVariantArrow(duckdb_database database) {
+	if (!database) {
+		return DuckDBError;
+	}
+	auto wrapper = reinterpret_cast<DatabaseWrapper *>(database);
+	RegisterParquetVariantArrowExtension(*wrapper->database->instance);
+	return DuckDBSuccess;
+}
+
+} // namespace duckdb
+
+extern "C" DUCKDB_EXTENSION_API duckdb_state duckdb_parquet_variant_bytes_to_json(duckdb_database database,
+                                                                                  const uint8_t *metadata,
+                                                                                  idx_t metadata_len,
+                                                                                  const uint8_t *value, idx_t value_len,
+                                                                                  char **out_json) {
+	if (!database || !out_json) {
+		return DuckDBError;
+	}
+	*out_json = nullptr;
+	if (!metadata || !value) {
+		return DuckDBError;
+	}
+	try {
+		auto json = duckdb::ParquetVariantBytesToJson(metadata, metadata_len, value, value_len);
+		*out_json = strdup(json.c_str());
+		if (!*out_json) {
+			return DuckDBError;
+		}
+		return DuckDBSuccess;
+	} catch (...) {
+		return DuckDBError;
+	}
+}
+
+extern "C" DUCKDB_EXTENSION_API duckdb_state duckdb_register_parquet_variant_arrow(duckdb_database database) {
+	try {
+		return duckdb::RegisterParquetVariantArrow(database);
+	} catch (...) {
+		return DuckDBError;
+	}
+}

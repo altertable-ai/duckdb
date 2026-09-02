@@ -73,6 +73,17 @@ QueryProfileResult &QueryProfileResult::AppendList() {
 	return ref;
 }
 
+unique_ptr<QueryProfileResult> QueryProfileResult::Copy() const {
+	auto result = make_uniq<QueryProfileResult>();
+	result->kind = kind;
+	result->key = key;
+	result->value = value;
+	for (auto &child : children) {
+		result->children.push_back(child->Copy());
+	}
+	return result;
+}
+
 QueryProfiler::QueryProfiler(ClientContext &context_p)
     : context(context_p), running(false), query_requires_profiling(false), is_explain_analyze(false),
       metrics_finalized(false) {
@@ -102,13 +113,19 @@ bool QueryProfiler::PrintOptimizerOutput() const {
 		return metrics->MetricIsTracked("optimizer.join_order");
 	}
 	// Fall back to checking tracked_metrics patterns directly
-	auto &config = ClientConfig::GetConfig(context);
-	for (const auto &pattern : config.tracked_metrics) {
+	for (const auto &pattern : GetTrackedMetrics()) {
 		if (pattern == "*" || StringUtil::StartsWith(pattern, "optimizer")) {
 			return true;
 		}
 	}
 	return false;
+}
+
+vector<string> QueryProfiler::GetTrackedMetrics() const {
+	if (is_explain_analyze) {
+		return {"*"};
+	}
+	return ClientConfig::GetConfig(context).tracked_metrics;
 }
 
 string QueryProfiler::GetSaveLocation() const {
@@ -989,6 +1006,17 @@ QueryProfileResult &QueryProfiler::GetResult() {
 	return *result_tree;
 }
 
+unique_ptr<QueryProfileResult> QueryProfiler::CopyResult() {
+	lock_guard<std::mutex> guard(lock);
+	if (!IsEnabled() || !root) {
+		return nullptr;
+	}
+	if (!result_tree) {
+		result_tree = ToResultTree();
+	}
+	return result_tree->Copy();
+}
+
 bool QueryProfiler::HasRoot() const {
 	return root != nullptr;
 }
@@ -1061,8 +1089,7 @@ void QueryProfiler::Initialize(const PhysicalOperator &root_op) {
 		tree_map.clear();
 		root = nullptr;
 	} else {
-		auto &client_config = ClientConfig::GetConfig(context);
-		metrics = make_uniq<GatheredMetrics>(client_config.tracked_metrics);
+		metrics = make_uniq<GatheredMetrics>(GetTrackedMetrics());
 	}
 }
 
