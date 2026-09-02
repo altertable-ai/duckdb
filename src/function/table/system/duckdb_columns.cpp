@@ -1,4 +1,5 @@
 #include "duckdb/function/table/system_functions.hpp"
+#include "duckdb/function/table/system_catalog_functions.hpp"
 #include "duckdb/common/atomic.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
@@ -89,14 +90,13 @@ static unique_ptr<FunctionData> DuckDBColumnsBind(ClientContext &context, TableF
 	names.emplace_back("generation_expression");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
-	return nullptr;
+	return SystemCatalogScanFunction::Bind();
 }
 
 static unique_ptr<GlobalTableFunctionState> DuckDBColumnsInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto result = make_uniq<DuckDBColumnsData>();
 
-	// scan all the schemas for tables and views and collect them
-	auto schemas = Catalog::GetAllSchemas(context);
+	auto schemas = SystemCatalogScanFunction::GetSchemas(context, input.bind_data);
 	for (auto &schema : schemas) {
 		schema.get().Scan(context, CatalogType::TABLE_ENTRY,
 		                  [&](CatalogEntry &entry) { result->entries.push_back(entry); });
@@ -431,7 +431,8 @@ static double DuckDBColumnsProgress(ClientContext &context, const FunctionData *
 void DuckDBColumnsFun::RegisterFunction(BuiltinFunctions &set) {
 	TableFunction columns("duckdb_columns", {}, DuckDBColumnsFunction, DuckDBColumnsBind, DuckDBColumnsInit);
 	columns.table_scan_progress = DuckDBColumnsProgress;
-	set.AddFunction(columns);
+	SystemCatalogScanFunction::Register(columns);
+	set.AddFunction(std::move(columns));
 }
 
 } // namespace duckdb
