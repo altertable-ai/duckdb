@@ -64,7 +64,9 @@ private:
 				return false;
 			}
 			const auto &segment = *(next - 1);
-			cursor = Cursor {segment.*START, (*next).*START, segment.offset};
+			cursor.lo = segment.*START;
+			cursor.hi = (*next).*START;
+			cursor.offset = segment.offset;
 		}
 		offset = cursor.offset;
 		return true;
