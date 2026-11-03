@@ -31,6 +31,7 @@ struct SystemCatalogScanFunction {
 	static void PushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data,
 	                                  vector<unique_ptr<Expression>> &filters);
 	static InsertionOrderPreservingMap<string> ToString(TableFunctionToStringInput &input);
+	static TableFunctionToSQLResult ToSQL(ClientContext &context, const LogicalGet &get);
 	static void Serialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
 	                      const BoundTableFunction &function);
 	static unique_ptr<FunctionData> Deserialize(Deserializer &deserializer, BoundTableFunction &function);

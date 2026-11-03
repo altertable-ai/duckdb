@@ -5,6 +5,15 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/comparison_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -123,6 +132,26 @@ InsertionOrderPreservingMap<string> SystemCatalogScanFunction::ToString(TableFun
 	return result;
 }
 
+//! The pushed-down filter is gone from the plan, so the exported source has to carry it again.
+TableFunctionToSQLResult SystemCatalogScanFunction::ToSQL(ClientContext &, const LogicalGet &get) {
+	auto function = make_uniq<TableFunctionRef>();
+	function->function =
+	    make_uniq<FunctionExpression>(get.function.GetQualifiedName(), vector<unique_ptr<ParsedExpression>>());
+	if (!get.bind_data || get.bind_data->Cast<SystemCatalogScanBindData>().catalog.empty()) {
+		return {std::move(function), {}};
+	}
+	auto &catalog = get.bind_data->Cast<SystemCatalogScanBindData>().catalog;
+	auto select = make_uniq<SelectNode>();
+	select->select_list.push_back(make_uniq<StarExpression>());
+	select->from_table = std::move(function);
+	select->where_clause = make_uniq<ComparisonExpression>(
+	    ExpressionType::COMPARE_EQUAL, make_uniq<ColumnRefExpression>(Identifier(DATABASE_NAME_COLUMN)),
+	    ConstantExpression::FromValue(Value(catalog)));
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	return {make_uniq<SubqueryRef>(std::move(statement)), {}};
+}
+
 void SystemCatalogScanFunction::Serialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
                                           const BoundTableFunction &) {
 	string catalog;
@@ -141,6 +170,7 @@ unique_ptr<FunctionData> SystemCatalogScanFunction::Deserialize(Deserializer &de
 void SystemCatalogScanFunction::Register(TableFunction &function) {
 	function.pushdown_complex_filter = PushdownComplexFilter;
 	function.to_string = ToString;
+	function.to_sql = ToSQL;
 	function.serialize = Serialize;
 	function.deserialize = Deserialize;
 }
