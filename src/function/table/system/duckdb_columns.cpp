@@ -91,18 +91,14 @@ static unique_ptr<FunctionData> DuckDBColumnsBind(ClientContext &context, TableF
 	names.emplace_back("generation_expression");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
-	return SystemCatalogScanner::CreateBindData(names);
+	return SystemCatalogScanner::CreateBindData(names, return_types, "table_name", "table_oid");
 }
 
 static unique_ptr<GlobalTableFunctionState> DuckDBColumnsInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto result = make_uniq<DuckDBColumnsData>();
 
-	// scan all the schemas for tables and views and collect them
-	auto schemas = SystemCatalogScanner::GetSchemas(context, input, result->stats);
-	for (auto &schema : schemas) {
-		schema.get().Scan(context, CatalogType::TABLE_ENTRY,
-		                  [&](CatalogEntry &entry) { result->entries.push_back(entry); });
-	}
+	// collect the tables and views that survive the pushed-down filters
+	result->entries = SystemCatalogScanner::GetEntries(context, input, CatalogType::TABLE_ENTRY, result->stats);
 	return std::move(result);
 }
 
@@ -436,6 +432,8 @@ static void DuckDBColumnsGetMetrics(TableFunctionGetMetricsInput &input) {
 
 void DuckDBColumnsFun::RegisterFunction(BuiltinFunctions &set) {
 	TableFunction columns("duckdb_columns", {}, DuckDBColumnsFunction, DuckDBColumnsBind, DuckDBColumnsInit);
+	SystemCatalogScanner::RegisterPushdown(columns);
+	columns.get_metrics = DuckDBColumnsGetMetrics;
 	columns.table_scan_progress = DuckDBColumnsProgress;
 	SystemCatalogScanner::RegisterPushdown(columns);
 	columns.get_metrics = DuckDBColumnsGetMetrics;
