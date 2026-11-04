@@ -271,7 +271,7 @@ static uint64_t DetermineAcceptedColumnGap(ClientContext &context, ParquetReader
 }
 
 static void ParseParquetFooter(const_data_ptr_t buffer, const string &file_path, idx_t file_size,
-                               const shared_ptr<const ParquetEncryptionConfig> &encryption_config, uint32_t &footer_len,
+                               const shared_ptr<const ParquetEncryptionConfig> &encryption_config, idx_t &footer_len,
                                bool &footer_encrypted) {
 	if (memcmp(buffer + 4, "PAR1", 4) == 0) {
 		footer_encrypted = false;
@@ -290,7 +290,7 @@ static void ParseParquetFooter(const_data_ptr_t buffer, const string &file_path,
 	// read four-byte footer length from just before the end magic bytes
 	footer_len = Load<uint32_t>(buffer);
 	if (footer_len == 0 || file_size < 12 + footer_len) {
-		throw InvalidInputException("Footer length error in file '%s'", file_path);
+		throw DataCorruptionException("Footer length error in file '%s'", file_path);
 	}
 }
 
@@ -306,7 +306,7 @@ LoadMetadata(ClientContext &context, Allocator &allocator, CachingFileHandle &fi
 	}
 
 	bool footer_encrypted;
-	uint32_t footer_len;
+	idx_t footer_len;
 	// footer size is not provided - read it from the back
 	if (!footer_size.IsValid()) {
 		// We have to do two reads here:
@@ -345,7 +345,7 @@ LoadMetadata(ClientContext &context, Allocator &allocator, CachingFileHandle &fi
 		    file_size < 12 + provided_footer_len) {
 			throw InvalidInputException("Invalid footer length provided for file '%s'", file_handle.GetPath());
 		}
-		footer_len = UnsafeNumericCast<uint32_t>(provided_footer_len);
+		footer_len = provided_footer_len;
 
 		idx_t total_footer_len = footer_len + 8;
 		auto metadata_pos = file_size - total_footer_len;
@@ -355,7 +355,7 @@ LoadMetadata(ClientContext &context, Allocator &allocator, CachingFileHandle &fi
 		auto read_head = transport.GetReadHead(metadata_pos);
 		auto data_ptr = read_head->buffer_ptr;
 
-		uint32_t read_footer_len;
+		idx_t read_footer_len;
 		ParseParquetFooter(data_ptr + footer_len, file_handle.GetPath(), file_size, encryption_config, read_footer_len,
 		                   footer_encrypted);
 		if (read_footer_len != footer_len) {
@@ -900,6 +900,37 @@ static unique_ptr<ColumnReader> CreateInt96StructReader(ClientContext &context, 
 	return std::move(result);
 }
 
+//! Prune a shredded 'typed_value' column to the field a VARIANT extract path starts with. Returns false if the
+//! field is not shredded, in which case it can only be found in the binary 'value'.
+static bool TryCreateVariantPathIndex(idx_t typed_value_idx, const ParquetColumnSchema &typed_value,
+                                      const ColumnIndex &path, ColumnIndex &result) {
+	if (typed_value.type.id() != LogicalTypeId::STRUCT) {
+		return false;
+	}
+	auto field_idx = typed_value.GetChildIndexByName(path.GetFieldName());
+	if (!field_idx.IsValid()) {
+		return false;
+	}
+	ColumnIndex field_index(field_idx.GetIndex());
+	if (path.HasChildren()) {
+		//! Keep the field's own 'value', it holds the nested key when the field is not an object.
+		//! Without a shredded nested key the whole field is read, since an object cannot live in 'value' alone.
+		auto &field = typed_value.GetChildByIndex(field_idx.GetIndex());
+		auto value_idx = field.GetChildIndexByName("value");
+		auto nested_idx = field.GetChildIndexByName("typed_value");
+		ColumnIndex nested_index;
+		if (value_idx.IsValid() && nested_idx.IsValid() &&
+		    TryCreateVariantPathIndex(nested_idx.GetIndex(), field.GetChildByIndex(nested_idx.GetIndex()),
+		                              path.GetChildIndex(0), nested_index)) {
+			field_index.AddChildIndex(ColumnIndex(value_idx.GetIndex()));
+			field_index.AddChildIndex(std::move(nested_index));
+		}
+	}
+	result = ColumnIndex(typed_value_idx);
+	result.AddChildIndex(std::move(field_index));
+	return true;
+}
+
 unique_ptr<ColumnReader> ParquetReader::CreateReaderRecursive(ClientContext &context, const ColumnIndex &column_id,
                                                               const ParquetColumnSchema &schema) const {
 	auto &indexes = column_id.GetChildIndexes();
@@ -992,10 +1023,27 @@ unique_ptr<ColumnReader> ParquetReader::CreateReaderRecursive(ClientContext &con
 				auto typed_value_index = CreateVariantTypedValuePushdown(typed_value_schema, column_id);
 				return CreateReaderRecursive(context, typed_value_index, typed_value_schema);
 			}
-		}
-		for (idx_t child_index = 0; child_index < schema.children.size(); child_index++) {
-			children[child_index] =
-			    CreateReaderRecursive(context, ColumnIndex(child_index), schema.children[child_index]);
+			//! Only read the columns that can hold the extracted path. A shredded field is never also stored in the
+			//! binary 'value' of its object, so either the 'typed_value' field or the 'value' is enough.
+			auto metadata_idx = schema.GetChildIndexByName("metadata");
+			auto value_idx = schema.GetChildIndexByName("value");
+			if (!metadata_idx.IsValid() || !value_idx.IsValid()) {
+				throw InternalException("The Variant column must have 'metadata' and 'value' columns");
+			}
+			children[metadata_idx.GetIndex()] = CreateReaderRecursive(context, ColumnIndex(metadata_idx.GetIndex()),
+			                                                          schema.children[metadata_idx.GetIndex()]);
+			ColumnIndex typed_value_index;
+			if (TryCreateVariantPathIndex(2, typed_value_schema, column_id.GetChildIndex(0), typed_value_index)) {
+				children[2] = CreateReaderRecursive(context, typed_value_index, typed_value_schema);
+			} else {
+				children[value_idx.GetIndex()] = CreateReaderRecursive(context, ColumnIndex(value_idx.GetIndex()),
+				                                                       schema.children[value_idx.GetIndex()]);
+			}
+		} else {
+			for (idx_t child_index = 0; child_index < schema.children.size(); child_index++) {
+				children[child_index] =
+				    CreateReaderRecursive(context, ColumnIndex(child_index), schema.children[child_index]);
+			}
 		}
 		// Create the VariantColumnReader with the column index, so we can perform the extract at Read
 		auto column_reader = make_uniq<VariantColumnReader>(context, *this, schema, std::move(children), column_id);
@@ -1891,12 +1939,15 @@ FilterPropagateResult ParquetReader::CheckRowGroupFilterStatistics(ClientContext
 	return prune_result;
 }
 
-bool ParquetReader::DynamicFiltersExcludeRowGroup(ClientContext &context, ParquetReaderScanState &state) {
+bool ParquetReader::FiltersExcludeRowGroup(ClientContext &context, ParquetReaderScanState &state,
+                                           bool dynamic_filters_only) {
 	for (auto &scan_filter : state.scan_filters) {
-		auto &expr_filter =
-		    ExpressionFilter::GetExpressionFilter(scan_filter.filter, "ParquetReader::DynamicFiltersExcludeRowGroup");
-		if (!ExpressionFilter::ContainsInternalFunction(*expr_filter.expr, DynamicFilterScalarFun::NAME)) {
-			continue;
+		if (dynamic_filters_only) {
+			auto &expr_filter =
+			    ExpressionFilter::GetExpressionFilter(scan_filter.filter, "ParquetReader::FiltersExcludeRowGroup");
+			if (!ExpressionFilter::ContainsInternalFunction(*expr_filter.expr, DynamicFilterScalarFun::NAME)) {
+				continue;
+			}
 		}
 		auto &column_reader = state.GetColumnReader(MultiFileLocalIndex(scan_filter.filter_idx));
 		auto prune_result = CheckRowGroupFilterStatistics(context, state, column_reader, scan_filter.filter);
@@ -1925,6 +1976,11 @@ void ParquetReader::PrepareRowGroupBuffer(ClientContext &context, ParquetReaderS
 		                            GetFileName(), group.num_rows);
 	}
 	auto row_group_num_rows = NumericCast<idx_t>(group.num_rows);
+
+	if (filters && row_group_num_rows > 0 && state.offset_in_group == row_group_num_rows) {
+		// the row group is already ruled out (statistics pass or an earlier column): no Bloom filter reads
+		return;
+	}
 
 	if (filters) {
 		// filters contain output chunk index, not file col idx!
@@ -2309,6 +2365,11 @@ ParquetPrefetchStrategy ParquetReader::RegisterRowGroupReads(ClientContext &cont
 	state.group_offset = GetRowGroupOffset(*this, state.group_index);
 
 	auto &group = GetGroup(state);
+	// rule the row group out on the statistics of all filters before any column reads a Bloom filter
+	if (filters && group.num_rows > 0 && FiltersExcludeRowGroup(context, state, false)) {
+		rows_read += NumericCast<idx_t>(group.num_rows);
+		state.offset_in_group = NumericCast<idx_t>(group.num_rows);
+	}
 	// several readers can read the same column chunk (e.g. two fields of one variant column), count each chunk once
 	unordered_set<idx_t> scanned_column_chunks;
 	for (idx_t i = 0; i < column_ids.size(); i++) {
@@ -2561,7 +2622,7 @@ AsyncResult ParquetReader::Process(ClientContext &context, ParquetReaderScanStat
 	    Logger::Get(context).ShouldLog(ParquetPrefetchLogType::NAME, ParquetPrefetchLogType::LEVEL);
 	const idx_t group_num_rows = GetGroup(state).num_rows;
 	// Queued row groups may predate the current dynamic filter. Do not revisit a partially decoded chunk.
-	if (state.offset_in_group == 0 && !state.resuming_payload && DynamicFiltersExcludeRowGroup(context, state)) {
+	if (state.offset_in_group == 0 && !state.resuming_payload && FiltersExcludeRowGroup(context, state, true)) {
 		rows_read += group_num_rows;
 		state.offset_in_group = group_num_rows;
 	}

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/main/capi/extension_api.hpp"
 #include "duckdb/main/capi_v2/extension_load_v2.hpp"
@@ -43,9 +44,16 @@ class MetricsManager;
 class ExternalFileCache;
 class ResultSetManager;
 struct ParserCache;
+struct FunctionData;
+class SamplingPushdownRegistry;
+class SampleOptions;
+struct OptimizerExtensionInput;
+class LogicalOperator;
 
 class DatabaseInstance : public enable_shared_from_this<DatabaseInstance> {
 	friend class DuckDB;
+	friend class SamplingPushdownRegistry;
+	friend class OptimizerExtension;
 
 public:
 	DUCKDB_API DatabaseInstance();
@@ -136,6 +144,16 @@ private:
 	//! links, and which reaches it through autoloading - would therefore keep all of DuckDB alive in extensions that
 	//! link it statically. Only Initialize names it, and nothing that fails to open a database can reach that.
 	invoke_ext_capi_v2_fun_t invoke_capi_v2;
+	//! Sampling pushdown eligibility callbacks registered by extensions (e.g. ducklake).
+	//! Kept on DatabaseInstance (not process-static / not DBConfig) so loadable
+	//! extensions that link libduckdb_static share state with the host optimizer
+	//! without shifting DBConfig field offsets used by prebuilt extensions. Kept last so it does
+	//! not shift any DatabaseInstance field either.
+	unordered_map<string, bool (*)(const FunctionData &, const SampleOptions &)> sampling_pushdown_callbacks;
+	//! Pre-optimize functions that keep CTE filter dependencies intact (see
+	//! OptimizerExtension::RegisterCTEFilterDependencyPreserving). Kept after the other members for the same reason.
+	vector<void (*)(OptimizerExtensionInput &, unique_ptr<LogicalOperator> &)> cte_filter_dependency_preserving;
+	mutex cte_filter_dependency_preserving_lock;
 };
 
 //! A describe function for an extension class, so that loading it by class goes through the same path as linked
