@@ -586,6 +586,49 @@ static BranchResult CreateRegularBranch(Optimizer &optimizer, LogicalAggregate &
 	return result;
 }
 
+static bool IsTrivialGroup(const Expression &group) {
+	switch (group.GetExpressionClass()) {
+	case ExpressionClass::BOUND_COLUMN_REF:
+	case ExpressionClass::BOUND_CONSTANT:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// Every branch groups by the original groups, so a computed group would be evaluated once per branch. Compute it once
+// as an extra column of the shared input instead: branches read it through input_bindings like any other input column.
+static void StageGroupsInSharedInput(Optimizer &optimizer, LogicalAggregate &aggr,
+                                     vector<AggregateRewriteSet> &rewrite_sets, LogicalProjection &input,
+                                     vector<LogicalType> &input_types, vector<ColumnBinding> &input_bindings) {
+	TableIndex staged_index;
+	idx_t staged_count = 0;
+	for (auto &group : aggr.groups) {
+		if (IsTrivialGroup(*group)) {
+			continue;
+		}
+		if (staged_count == 0) {
+			staged_index = optimizer.binder.GenerateTableIndex();
+		}
+		const ColumnBinding staged_binding(staged_index, ProjectionIndex(staged_count++));
+		auto staged = make_uniq<BoundColumnRefExpression>(group->GetReturnType(), staged_binding);
+		// Rewrite plans were built from copies of the original groups.
+		for (auto &set : rewrite_sets) {
+			for (auto &stage : set.plan->stages) {
+				for (auto &stage_group : stage.groups) {
+					if (Expression::Equals(*stage_group, *group)) {
+						stage_group = staged->Copy();
+					}
+				}
+			}
+		}
+		input_types.push_back(group->GetReturnType());
+		input_bindings.push_back(staged_binding);
+		input.expressions.push_back(std::move(group));
+		group = std::move(staged);
+	}
+}
+
 static unique_ptr<LogicalOperator> JoinBranches(const vector<BranchResult> &branches,
                                                 vector<unique_ptr<LogicalOperator>> branch_plans,
                                                 const vector<unique_ptr<Expression>> &groups) {
@@ -771,11 +814,13 @@ bool MultiStageAggregateRewriter::TryRewrite(unique_ptr<LogicalOperator> &op) {
 	if (needs_cte) {
 		op->children[0]->ResolveOperatorTypes();
 		input_types = op->children[0]->types;
-		input_names = AggregateRewriteHelper::GenerateColumnNames("__aggregate_input", input_types.size());
 		input_bindings = op->children[0]->GetColumnBindings();
 		cte_index = optimizer.binder.GenerateTableIndex();
-		op->children[0] =
+		auto input =
 		    LogicalProjection::CreateIdentity(optimizer.binder.GenerateTableIndex(), std::move(op->children[0]));
+		StageGroupsInSharedInput(optimizer, aggr, rewrite_sets, *input, input_types, input_bindings);
+		input_names = AggregateRewriteHelper::GenerateColumnNames("__aggregate_input", input_types.size());
+		op->children[0] = std::move(input);
 	}
 
 	vector<BranchResult> branches;
