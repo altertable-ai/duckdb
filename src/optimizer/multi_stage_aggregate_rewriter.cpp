@@ -86,18 +86,35 @@ static bool ArgumentsEqualIncludingCollation(const BoundAggregateExpression &lhs
 	return true;
 }
 
-static void AddOrderExpressions(DistinctAggregateSet &set, const BoundAggregateExpression &aggregate) {
+//! ORDER BY expressions that are not arguments become extra deduplication keys of the distinct branch.
+static vector<unique_ptr<Expression>> GetOrderExpressions(const BoundAggregateExpression &aggregate) {
+	vector<unique_ptr<Expression>> result;
 	if (!aggregate.GetOrderBys()) {
-		return;
+		return result;
 	}
 	for (auto &order : aggregate.GetOrderBys()->orders) {
 		if (FindExpression(aggregate.GetChildren(), *order.expression).IsValid()) {
 			continue;
 		}
-		if (!FindExpression(set.order_expressions, *order.expression).IsValid()) {
-			set.order_expressions.push_back(order.expression->Copy());
+		if (!FindExpression(result, *order.expression).IsValid()) {
+			result.push_back(order.expression->Copy());
 		}
 	}
+	return result;
+}
+
+//! Extra deduplication keys change which rows are duplicates, so aggregates sharing a branch must agree on them.
+static bool OrderExpressionsEqual(const vector<unique_ptr<Expression>> &lhs,
+                                  const vector<unique_ptr<Expression>> &rhs) {
+	if (lhs.size() != rhs.size()) {
+		return false;
+	}
+	for (auto &expr : lhs) {
+		if (!FindExpression(rhs, *expr).IsValid()) {
+			return false;
+		}
+	}
+	return true;
 }
 
 static unique_ptr<BoundAggregateExpression> CreateFinalAggregate(const BoundAggregateExpression &source,
@@ -586,6 +603,49 @@ static BranchResult CreateRegularBranch(Optimizer &optimizer, LogicalAggregate &
 	return result;
 }
 
+static bool IsTrivialGroup(const Expression &group) {
+	switch (group.GetExpressionClass()) {
+	case ExpressionClass::BOUND_COLUMN_REF:
+	case ExpressionClass::BOUND_CONSTANT:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// Every branch groups by the original groups, so a computed group would be evaluated once per branch. Compute it once
+// as an extra column of the shared input instead: branches read it through input_bindings like any other input column.
+static void StageGroupsInSharedInput(Optimizer &optimizer, LogicalAggregate &aggr,
+                                     vector<AggregateRewriteSet> &rewrite_sets, LogicalProjection &input,
+                                     vector<LogicalType> &input_types, vector<ColumnBinding> &input_bindings) {
+	TableIndex staged_index;
+	idx_t staged_count = 0;
+	for (auto &group : aggr.groups) {
+		if (IsTrivialGroup(*group)) {
+			continue;
+		}
+		if (staged_count == 0) {
+			staged_index = optimizer.binder.GenerateTableIndex();
+		}
+		const ColumnBinding staged_binding(staged_index, ProjectionIndex(staged_count++));
+		auto staged = make_uniq<BoundColumnRefExpression>(group->GetReturnType(), staged_binding);
+		// Rewrite plans were built from copies of the original groups.
+		for (auto &set : rewrite_sets) {
+			for (auto &stage : set.plan->stages) {
+				for (auto &stage_group : stage.groups) {
+					if (Expression::Equals(*stage_group, *group)) {
+						stage_group = staged->Copy();
+					}
+				}
+			}
+		}
+		input_types.push_back(group->GetReturnType());
+		input_bindings.push_back(staged_binding);
+		input.expressions.push_back(std::move(group));
+		group = std::move(staged);
+	}
+}
+
 static unique_ptr<LogicalOperator> JoinBranches(const vector<BranchResult> &branches,
                                                 vector<unique_ptr<LogicalOperator>> branch_plans,
                                                 const vector<unique_ptr<Expression>> &groups) {
@@ -743,20 +803,21 @@ bool MultiStageAggregateRewriter::TryRewrite(unique_ptr<LogicalOperator> &op) {
 			}
 			keys.push_back(std::move(key));
 		}
+		auto order_expressions = GetOrderExpressions(aggregate);
 		bool found_match = false;
 		for (auto &set : distinct_sets) {
 			auto &other = aggr.expressions[set.source_index]->Cast<BoundAggregateExpression>();
 			if (ArgumentsEqualIncludingCollation(aggregate, other) && Expression::ListEquals(keys, set.keys) &&
-			    Expression::Equals(aggregate.GetFilter(), other.GetFilter())) {
+			    Expression::Equals(aggregate.GetFilter(), other.GetFilter()) &&
+			    OrderExpressionsEqual(order_expressions, set.order_expressions)) {
 				set.aggregate_indices.push_back(aggregate_idx);
-				AddOrderExpressions(set, aggregate);
 				found_match = true;
 				break;
 			}
 		}
 		if (!found_match) {
 			distinct_sets.emplace_back(aggregate_idx, std::move(keys));
-			AddOrderExpressions(distinct_sets.back(), aggregate);
+			distinct_sets.back().order_expressions = std::move(order_expressions);
 		}
 	}
 	if (distinct_sets.empty() && rewrite_sets.empty()) {
@@ -771,11 +832,13 @@ bool MultiStageAggregateRewriter::TryRewrite(unique_ptr<LogicalOperator> &op) {
 	if (needs_cte) {
 		op->children[0]->ResolveOperatorTypes();
 		input_types = op->children[0]->types;
-		input_names = AggregateRewriteHelper::GenerateColumnNames("__aggregate_input", input_types.size());
 		input_bindings = op->children[0]->GetColumnBindings();
 		cte_index = optimizer.binder.GenerateTableIndex();
-		op->children[0] =
+		auto input =
 		    LogicalProjection::CreateIdentity(optimizer.binder.GenerateTableIndex(), std::move(op->children[0]));
+		StageGroupsInSharedInput(optimizer, aggr, rewrite_sets, *input, input_types, input_bindings);
+		input_names = AggregateRewriteHelper::GenerateColumnNames("__aggregate_input", input_types.size());
+		op->children[0] = std::move(input);
 	}
 
 	vector<BranchResult> branches;
