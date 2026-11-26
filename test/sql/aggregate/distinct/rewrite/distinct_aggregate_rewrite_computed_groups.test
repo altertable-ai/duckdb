@@ -1,0 +1,81 @@
+# name: test/sql/aggregate/distinct/rewrite/distinct_aggregate_rewrite_computed_groups.test
+# description: DISTINCT aggregate rewrites compute non-trivial groups once in the shared input
+# group: [rewrite]
+
+statement ok
+CREATE TABLE computed_groups AS
+	SELECT CASE WHEN i % 9 = 0 THEN NULL ELSE 'k' || (i % 5) END AS s, i % 3 AS g,
+	       CASE WHEN i % 7 = 0 THEN NULL ELSE i % 13 END AS x, i % 4 AS y
+	FROM range(200) tbl(i);
+
+# computed group with a NULL key, mixed distinct and regular aggregates
+query IIII
+SELECT upper(s) AS k, count(*), count(DISTINCT x), sum(y)
+FROM computed_groups
+GROUP BY k
+ORDER BY k NULLS FIRST;
+----
+NULL	23	13	33
+K0	35	13	54
+K1	36	13	54
+K2	36	13	54
+K3	35	13	52
+K4	35	13	53
+
+# computed and plain groups together, two distinct sets
+query IIIII
+SELECT upper(s) AS k, g, count(DISTINCT x), count(DISTINCT y), count(*)
+FROM computed_groups
+GROUP BY k, g
+ORDER BY k NULLS FIRST, g;
+----
+NULL	0	13	4	23
+K0	0	8	4	9
+K0	1	11	4	13
+K0	2	11	4	13
+K1	0	8	4	9
+K1	1	12	4	14
+K1	2	11	4	13
+K2	0	7	4	9
+K2	1	11	4	13
+K2	2	11	4	14
+K3	0	8	4	9
+K3	1	11	4	13
+K3	2	12	4	13
+K4	0	7	4	8
+K4	1	11	4	14
+K4	2	11	4	13
+
+# a rewritten aggregate (mode) shares the staged group with the distinct branch
+query III
+SELECT upper(s) AS k, mode(y ORDER BY y), count(DISTINCT x)
+FROM computed_groups
+GROUP BY k
+ORDER BY k NULLS FIRST;
+----
+NULL	0	13
+K0	1	13
+K1	0	13
+K2	0	13
+K3	0	13
+K4	0	13
+
+statement ok
+PRAGMA explain_output='optimized_only';
+
+# the computed group is evaluated once, below the shared CTE, instead of once per branch
+query II
+EXPLAIN SELECT upper(s), count(*), count(DISTINCT x) FROM computed_groups GROUP BY upper(s);
+----
+logical_opt	<REGEX>:.*upper\(s\).*
+
+query II
+EXPLAIN SELECT upper(s), count(*), count(DISTINCT x) FROM computed_groups GROUP BY upper(s);
+----
+logical_opt	<!REGEX>:.*upper\(s\).*upper\(s\).*
+
+# the rewritten aggregate's branch reads the staged group too
+query II
+EXPLAIN SELECT upper(s), mode(y ORDER BY y), count(DISTINCT x) FROM computed_groups GROUP BY upper(s);
+----
+logical_opt	<!REGEX>:.*upper\(s\).*upper\(s\).*

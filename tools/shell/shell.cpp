@@ -44,7 +44,7 @@
 #endif
 
 #include <stdlib.h>
-#include "duckdb/logging/log_storage.hpp"
+#include "duckdb/logging/log_sink.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/statement_iterator.hpp"
 #include <string.h>
@@ -602,6 +602,8 @@ char *ShellState::OneInputLine(FILE *in, char *&zPrior, int isContinuation) {
 		}
 		free(zPrior);
 		zPrior = nullptr;
+		// probing the terminal inside the line editor is not possible - detect before editing
+		DetectDarkLightMode();
 		return linenoise(prompt_text);
 	}
 #endif
@@ -1277,30 +1279,30 @@ unique_ptr<duckdb::ProgressBarDisplay> CreateAgentProgressBar() {
 	return make_uniq<AgentProgressBarDisplay>();
 }
 
-static void RegisterShellLogger(duckdb::DuckDB &db, duckdb::shared_ptr<duckdb::LogStorage> storage_ptr) {
+static void RegisterShellLogger(duckdb::DuckDB &db, duckdb::shared_ptr<duckdb::LogSink> sink_ptr) {
 	auto *db_instance = db.instance.get();
 	auto &log_manager = db_instance->GetLogManager();
-	log_manager.RegisterLogStorage("shell_log_storage", storage_ptr);
-	log_manager.SetLogStorage(*db_instance, "shell_log_storage");
+	log_manager.RegisterLogSink("shell_log_sink", sink_ptr);
+	log_manager.SetLogSink(*db_instance, "shell_log_sink");
 	log_manager.SetEnableLogging(db_instance);
 	log_manager.SetLogLevel(duckdb::LogLevel::LOG_WARNING);
 }
 
 void ShellState::OpenDB(ShellOpenFlags flags) {
-	// log storage to stdout
-	auto std_out_log_storage = duckdb::make_shared_ptr<ShellLogStorage>(*this);
-	duckdb::shared_ptr<duckdb::LogStorage> storage_ptr = std_out_log_storage;
+	// log sink to stdout
+	auto shell_log_sink = duckdb::make_shared_ptr<ShellLogSink>(*this);
+	duckdb::shared_ptr<duckdb::LogSink> sink_ptr = shell_log_sink;
 
 	if (!db) {
 		try {
 			db = make_uniq<duckdb::DuckDB>(zDbFilename.c_str(), &config);
-			RegisterShellLogger(*db, storage_ptr);
+			RegisterShellLogger(*db, sink_ptr);
 			conn = make_uniq<duckdb::Connection>(*db);
 		} catch (std::exception &ex) {
 			PrintDatabaseError(duckdb::ErrorData(ex));
 			if (flags == ShellOpenFlags::KEEP_ALIVE_ON_FAILURE) {
 				db = make_uniq<duckdb::DuckDB>(":memory:", &config);
-				RegisterShellLogger(*db, storage_ptr);
+				RegisterShellLogger(*db, sink_ptr);
 				conn = make_uniq<duckdb::Connection>(*db);
 			} else {
 				ShellState::Exit(1);
@@ -2564,7 +2566,7 @@ LIMIT 5)");
 		if (!style.layout_on.empty()) {
 			style.layout_off = ShellHighlight::ResetTerminalCode();
 		}
-		if (linenoiseGetTerminalColorMode() == LINENOISE_LIGHT_MODE) {
+		if (highlight_mode == HighlightMode::LIGHT_MODE) {
 			style.heading_on = ShellHighlight::TerminalCode(PrintColor::BLACK, PrintIntensity::BOLD);
 			style.path_on = ShellHighlight::TerminalCode(PrintColor::BLACK, PrintIntensity::STANDARD);
 		} else {
@@ -2791,56 +2793,56 @@ MetadataResult ShellState::ToggleTimer(ShellState &state, const vector<string> &
 **
 ** Return 1 on error, 2 to exit, and 0 otherwise.
 */
+static void SkipSpaces(const string &zLine, idx_t &pos) {
+	while (pos < zLine.size() && ShellState::IsSpace(zLine[pos])) {
+		pos++;
+	}
+}
+
+//! Parse one, optionally quoted, dot command argument starting at pos
+static string ParseMetaCommandArgument(const string &zLine, idx_t &pos) {
+	string arg;
+	if (zLine[pos] == '\'' || zLine[pos] == '"') {
+		// quoted argument - scan until next quote
+		auto quote = zLine[pos];
+		// skip over the initial quote
+		pos++;
+
+		while (pos < zLine.size() && zLine[pos] != quote) {
+			if (zLine[pos] == '\\' && quote == '"' && pos + 1 < zLine.size()) {
+				// skip over any escaped characters
+				arg += zLine[pos++];
+			}
+			arg += zLine[pos++];
+		}
+		if (pos < zLine.size()) {
+			// skip over the final quote
+			pos++;
+		}
+		if (quote == '"') {
+			arg = resolve_backslashes(arg);
+		}
+	} else {
+		// unquoted argument - scan until the next space
+		while (pos < zLine.size() && !ShellState::IsSpace(zLine[pos])) {
+			arg += zLine[pos];
+			pos++;
+		}
+		arg = resolve_backslashes(arg);
+	}
+	return arg;
+}
+
 int ShellState::DoMetaCommand(const string &zLine) {
 	int rc = 0;
 	vector<string> args;
 	// skip initial dot
 	idx_t pos = 1;
-	while (pos < zLine.size()) {
-		// skip initial spaces
-		while (pos < zLine.size() && IsSpace(zLine[pos])) {
-			pos++;
-		}
-		if (pos >= zLine.size()) {
-			break;
-		}
-		string arg;
-		if (zLine[pos] == '\'' || zLine[pos] == '"') {
-			// quoted argument - scan until next quote
-			auto quote = zLine[pos];
-			// skip over the initial quote
-			pos++;
-
-			while (pos < zLine.size() && zLine[pos] != quote) {
-				if (zLine[pos] == '\\' && quote == '"' && pos + 1 < zLine.size()) {
-					// skip over any escaped characters
-					arg += zLine[pos++];
-				}
-				arg += zLine[pos++];
-			}
-			if (pos < zLine.size()) {
-				// skip over the final quote
-				pos++;
-			}
-			if (quote == '"') {
-				arg = resolve_backslashes(arg);
-			}
-		} else {
-			// unquoted argument - scan until the next space
-			while (pos < zLine.size() && !IsSpace(zLine[pos])) {
-				arg += zLine[pos];
-				pos++;
-			}
-			arg = resolve_backslashes(arg);
-		}
-		args.push_back(std::move(arg));
-	}
-
-	/* Process the input line.
-	 */
-	if (args.empty()) {
+	SkipSpaces(zLine, pos);
+	if (pos >= zLine.size()) {
 		return 0; /* no tokens, no error */
 	}
+	args.push_back(ParseMetaCommandArgument(zLine, pos));
 	ClearTempFile();
 
 	string error_msg;
@@ -2851,6 +2853,18 @@ int ShellState::DoMetaCommand(const string &zLine) {
 		rc = 1;
 	} else {
 		auto &command = *metadata_command;
+		SkipSpaces(zLine, pos);
+		if (command.raw_arguments) {
+			// e.g. a command line for .shell - the system shell does its own quoting
+			if (pos < zLine.size()) {
+				args.push_back(zLine.substr(pos));
+			}
+		} else {
+			while (pos < zLine.size()) {
+				args.push_back(ParseMetaCommandArgument(zLine, pos));
+				SkipSpaces(zLine, pos);
+			}
+		}
 		MetadataResult result = MetadataResult::PRINT_USAGE;
 		try {
 			if (!command.callback) {
@@ -3767,6 +3781,10 @@ void ShellState::PrintQueryEstimate(const string &sql, const duckdb::SQLStatemen
 void ShellState::DetectDarkLightMode() {
 #ifdef HAVE_LINENOISE
 	ShellHighlight highlight(*this);
+	if (!ShellHighlight::IsEnabled()) {
+		// no colors are printed - no need to detect
+		return;
+	}
 	if (highlight_mode != HighlightMode::AUTOMATIC) {
 		// highlight mode is specified by the user - avoid setting manually
 		return;
@@ -3776,7 +3794,9 @@ void ShellState::DetectDarkLightMode() {
 		return;
 	}
 	// detect terminal colors
-	auto terminal_color = linenoiseGetTerminalColorMode();
+	// the terminal is not queried while stdin is read by the shell itself (-batch) - only COLORFGBG is used then
+	auto terminal_color =
+	    linenoiseGetTerminalColorMode(rl_version == ReadLineVersion::LINENOISE && (stdin_is_interactive || !readStdin));
 	if (terminal_color == LINENOISE_DARK_MODE) {
 		highlight_mode = HighlightMode::DARK_MODE;
 		highlight.ToggleMode(HighlightMode::DARK_MODE);
@@ -3847,6 +3867,12 @@ int RunShell(int argc, const char **argv) {
 	data.stderr_is_console = IsStdStreamAConsole(2);
 
 	data.Initialize();
+
+	auto no_color = getenv("NO_COLOR");
+	if (no_color && no_color[0]) {
+		// https://no-color.org - can still be turned on explicitly with .highlight on
+		ShellHighlight::SetHighlighting(false);
+	}
 
 	/* On Windows, we must translate command-line arguments into UTF-8.
 	 */
@@ -3965,8 +3991,6 @@ int RunShell(int argc, const char **argv) {
 		data.PrintAgentHelp(PrintOutput::STDERR, true);
 	}
 
-	data.DetectDarkLightMode();
-
 	/* Make a second pass through the command-line argument and set
 	** options.  This second pass is delayed until after the initialization
 	** file is processed so that the command-line arguments will override
@@ -4043,6 +4067,8 @@ int RunShell(int argc, const char **argv) {
 #endif
 			ShellHistory history(data, zHistory);
 			data.in = 0;
+			// the line editor needs the colors up front
+			data.DetectDarkLightMode();
 			rc = data.ProcessInput(InputMode::STANDARD);
 		} else {
 			data.in = stdin;

@@ -774,6 +774,10 @@ void FunctionBinder::CastToFunctionArguments(BoundSimpleFunction &function, vect
 			    "Function %s returned a STRING_LITERAL or INTEGER_LITERAL type - return an explicit type instead",
 			    function.GetName());
 		}
+		if (children[i]->GetReturnType().id() == LogicalTypeId::UNKNOWN && !target_type.IsComplete()) {
+			// an unresolved parameter cannot take an incomplete type, the statement is bound again at EXECUTE
+			throw ParameterNotResolvedException();
+		}
 		target_type.Verify();
 		// don't cast lambda children, their slot only ever holds a placeholder
 		if (children[i]->GetReturnType().id() == LogicalTypeId::LAMBDA) {
@@ -791,9 +795,9 @@ void FunctionBinder::CastToFunctionArguments(BoundSimpleFunction &function, vect
 		// except for one special case: if the function accepts ANY argument
 		// in that case we don't add a cast
 		if (cast_result == LogicalTypeComparisonResult::DIFFERENT_TYPES) {
-			if (target_has_any && children[i]->GetReturnType().id() != LogicalTypeId::UNKNOWN) {
+			if (target_has_any) {
 				// a type that is not concrete cannot be cast to (e.g. a NULL or a VARIANT passed to LIST(ANY)) - the
-				// function has to handle the argument as-is. Unresolved parameters are still assigned the type.
+				// function has to handle the argument as-is
 				continue;
 			}
 			if (IsIncompleteCastTarget(target_type)) {
@@ -857,13 +861,17 @@ static bool HasUntypedNullArgument(const vector<unique_ptr<Expression>> &regular
 //! Evaluates a constant argument and returns true if it is NULL. A non-NULL result replaces the argument with a
 //! constant: the argument has been evaluated anyway, and keeping the result means that it is not evaluated again by
 //! every enclosing function call - which made binding nested constant expressions quadratic in their depth.
-static bool FoldConstantArgument(ClientContext &context, unique_ptr<Expression> &child) {
+static bool FoldConstantArgument(ClientContext &context, unique_ptr<Expression> &child, optional_ptr<Binder> binder) {
 	if (child->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 		return child->Cast<BoundConstantExpression>().GetValue().IsNull();
 	}
 	// a lambda has no value of its own, the function it is passed to executes its body
 	if (child->GetExpressionClass() == ExpressionClass::BOUND_LAMBDA || !child->IsFoldable()) {
 		return false;
+	}
+	if (binder && child->RequiresRebind()) {
+		// the constant no longer shows that its value can change across queries
+		binder->SetAlwaysRequireRebind();
 	}
 	Value result;
 	if (!ExpressionExecutor::TryEvaluateScalar(context, *child, result)) {
@@ -883,14 +891,15 @@ static bool FoldConstantArgument(ClientContext &context, unique_ptr<Expression> 
 //! Returns true if any argument is a constant expression that evaluates to NULL. Arguments that evaluate to a non-NULL
 //! value are folded to constants along the way.
 static bool HasNullConstantArgument(ClientContext &context, vector<unique_ptr<Expression>> &regular_args,
-                                    vector<pair<Identifier, unique_ptr<Expression>>> &keyword_args) {
+                                    vector<pair<Identifier, unique_ptr<Expression>>> &keyword_args,
+                                    optional_ptr<Binder> binder) {
 	for (auto &child : regular_args) {
-		if (FoldConstantArgument(context, child)) {
+		if (FoldConstantArgument(context, child, binder)) {
 			return true;
 		}
 	}
 	for (auto &child : keyword_args) {
-		if (FoldConstantArgument(context, child.second)) {
+		if (FoldConstantArgument(context, child.second, binder)) {
 			return true;
 		}
 	}
@@ -931,7 +940,7 @@ unique_ptr<Expression> FunctionBinder::BindScalarFunction(const ScalarFunctionCa
 		if (HasUntypedNullArgument(regular_args, keyword_args)) {
 			return make_uniq<BoundConstantExpression>(Value(NullReturnType(return_type)));
 		}
-		if (HasNullConstantArgument(context, regular_args, keyword_args)) {
+		if (HasNullConstantArgument(context, regular_args, keyword_args, binder)) {
 			if (return_type.IsComplete()) {
 				BoundScalarFunction null_function(std::move(selected_function));
 				for (auto &child : keyword_args) {
@@ -1087,7 +1096,7 @@ static string ExtractCollation(const vector<unique_ptr<Expression>> &children) {
 
 //! Pushes the collations of the arguments into the children, returns the collation to propagate to the return type
 static string PushCollations(ClientContext &context, BoundSimpleFunction &bound_function,
-                             vector<unique_ptr<Expression>> &children, CollationType type) {
+                             vector<unique_ptr<Expression>> &children, CollationType type, bool is_index_key) {
 	FunctionCollations collations;
 	auto &argument_types = bound_function.GetArguments();
 	for (idx_t i = 0; i < children.size(); i++) {
@@ -1095,8 +1104,8 @@ static string PushCollations(ClientContext &context, BoundSimpleFunction &bound_
 		auto &target_type = argument_types[i].IsComplete() ? argument_types[i] : source_type;
 		ExtractCollationFromType(source_type, target_type, collations);
 	}
-	if (collations.collation.empty() && collations.fields.empty()) {
-		// no collation to push
+	if (is_index_key && collations.collation.empty() && collations.fields.empty()) {
+		// index keys only use explicit collations, comparison keys and the default collation would change them
 		return string();
 	}
 	// push collations to the children
@@ -1122,13 +1131,14 @@ static string PushCollations(ClientContext &context, BoundSimpleFunction &bound_
 
 //! Pushes collations into the children (if required), returns the collation to propagate to the return type
 static string PushArgumentCollations(ClientContext &context, BoundSimpleFunction &bound_function,
-                                     const FunctionProperties &props, vector<unique_ptr<Expression>> &children) {
+                                     const FunctionProperties &props, vector<unique_ptr<Expression>> &children,
+                                     bool is_index_key) {
 	switch (props.GetCollationHandling()) {
 	case FunctionCollationHandling::IGNORE_COLLATIONS:
 	case FunctionCollationHandling::PROPAGATE_COLLATIONS:
 		return string();
 	case FunctionCollationHandling::PUSH_COMBINABLE_COLLATIONS:
-		return PushCollations(context, bound_function, children, CollationType::COMBINABLE_COLLATIONS);
+		return PushCollations(context, bound_function, children, CollationType::COMBINABLE_COLLATIONS, is_index_key);
 	case FunctionCollationHandling::PUSH_DISTINCT_COLLATIONS:
 		throw InternalException("PUSH_DISTINCT_COLLATIONS is only supported for aggregate functions");
 	default:
@@ -1562,8 +1572,9 @@ FunctionBinder::ResolveScalarFunctionTypes(shared_ptr<const ScalarFunction> func
 	for (auto &argument_type : bound_function.GetArguments()) {
 		VerifyTemplateType(argument_type, bound_function.GetName());
 	}
+	const bool is_index_key = arguments_collated || (binder && binder->IsBindingIndexKey());
 	result.pushed_collation =
-	    PushArgumentCollations(context, bound_function, bound_function.GetProperties(), arguments);
+	    PushArgumentCollations(context, bound_function, bound_function.GetProperties(), arguments, is_index_key);
 	CastToFunctionArguments(bound_function, arguments);
 	return result;
 }
@@ -1577,6 +1588,15 @@ FunctionBinder::ResolveFunction(shared_ptr<const ScalarFunction> function_p, vec
 
 	// The bind callback is called with arguments that are cast to the argument types of the bound function
 	unique_ptr<FunctionData> bind_info;
+	if (binder && (bound_function.HasBindCallback() || bound_function.HasBindExpressionCallback())) {
+		// the callbacks can evaluate constant arguments and drop them, which hides casts that read settings
+		for (auto &argument : arguments) {
+			if (argument->IsFoldable() && argument->RequiresRebind()) {
+				binder->SetAlwaysRequireRebind();
+				break;
+			}
+		}
+	}
 	if (bound_function.HasBindCallback()) {
 		BindScalarFunctionInput input(context, bound_function, arguments, argument_names, binder);
 		bind_info = bound_function.GetBindCallback()(input);

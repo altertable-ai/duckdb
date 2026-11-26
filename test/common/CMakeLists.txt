@@ -9,6 +9,8 @@ add_library_unity(
   test_checked_integer.cpp
   test_checksum.cpp
   test_dictionary_hash_cache.cpp
+  test_expression_executor.cpp
+  test_vector_hash.cpp
   test_column_data_allocator.cpp
   test_file_buffer_handle_group.cpp
   test_file_system.cpp
@@ -27,6 +29,7 @@ add_library_unity(
   test_minmax_n_heap.cpp
   test_numeric_utils.cpp
   test_optional_idx.cpp
+  test_time_point.cpp
   test_parse_expression.cpp
   test_parse_load_statement.cpp
   test_parse_external_resource_source.cpp
@@ -48,6 +51,7 @@ add_library_unity(
   test_substring_oob.cpp
   test_swar.cpp
   test_aggregate_hll.cpp
+  test_jemalloc_tcache.cpp
   test_radix_ht_sink.cpp
   test_utf8_codepoint_oob.cpp
   test_temporary_memory_manager.cpp

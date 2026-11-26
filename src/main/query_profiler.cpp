@@ -17,6 +17,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/profiler/profiling_utils.hpp"
 #include "duckdb/main/profiler/gathered_metrics.hpp"
+#include "duckdb/main/profiler/metrics_manager.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/storage/buffer/buffer_pool.hpp"
 #include "duckdb/common/json_document.hpp"
@@ -71,6 +72,17 @@ QueryProfileResult &QueryProfileResult::AppendList() {
 	return ref;
 }
 
+unique_ptr<QueryProfileResult> QueryProfileResult::Copy() const {
+	auto result = make_uniq<QueryProfileResult>();
+	result->kind = kind;
+	result->key = key;
+	result->value = value;
+	for (auto &child : children) {
+		result->children.push_back(child->Copy());
+	}
+	return result;
+}
+
 QueryProfiler::QueryProfiler(ClientContext &context_p)
     : context(context_p), running(false), query_started(false), query_requires_profiling(false),
       is_explain_analyze(false), metrics_finalized(false) {
@@ -100,13 +112,19 @@ bool QueryProfiler::PrintOptimizerOutput() const {
 		return metrics->MetricIsTracked("optimizer.join_order");
 	}
 	// Fall back to checking tracked_metrics patterns directly
-	auto &config = ClientConfig::GetConfig(context);
-	for (const auto &pattern : config.tracked_metrics) {
+	for (const auto &pattern : GetTrackedMetrics()) {
 		if (pattern == "*" || StringUtil::StartsWith(pattern, "optimizer")) {
 			return true;
 		}
 	}
 	return false;
+}
+
+vector<string> QueryProfiler::GetTrackedMetrics() const {
+	if (is_explain_analyze) {
+		return {"*"};
+	}
+	return ClientConfig::GetConfig(context).tracked_metrics;
 }
 
 string QueryProfiler::GetSaveLocation() const {
@@ -119,6 +137,7 @@ QueryProfiler &QueryProfiler::Get(ClientContext &context) {
 
 void QueryProfiler::Start(const string &query) {
 	Reset();
+	tracked_metric_patterns = make_uniq<GatheredMetrics>(ClientConfig::GetConfig(context).tracked_metrics);
 	running = true;
 	query_metrics.query_sql = query;
 	query_metrics.latency_timer = make_uniq<MetricsTimer>(StartTimer<MetricQueryTotalTime>());
@@ -128,6 +147,7 @@ void QueryProfiler::Reset() {
 	tree_map.clear();
 	root = nullptr;
 	metrics.reset();
+	tracked_metric_patterns.reset();
 	running = false;
 	query_metrics.Reset();
 	result_tree.reset();
@@ -308,23 +328,39 @@ void QueryProfiler::TrackTotalMemoryAllocated(const idx_t amount) {
 }
 
 void QueryProfiler::AddToMetricCounter(const string &key, const idx_t amount) {
-	if (IsEnabled()) {
+	if (IsEnabled() && running) {
 		query_metrics.UpdateMetricCounter(key, amount);
 	}
 }
 
+void QueryProfiler::AddToMetricTiming(const string &key, const idx_t elapsed_ns) {
+	if (IsEnabled() && running) {
+		query_metrics.UpdateMetric(key, elapsed_ns);
+	}
+}
+
 void QueryProfiler::SetMetric(const string &key, Value new_value) {
-	if (!IsEnabled()) {
+	if (!IsEnabled() || !running) {
 		return;
 	}
-	metrics->SetMetric(key, std::move(new_value));
+	// only the metrics extensions registered: the profiler sets its own, and leaves some out on purpose
+	if (!MetricsManager::Get(context).IsRegisteredMetric(key)) {
+		return;
+	}
+	// the query's metrics are only gathered once its plan is built, so the value is kept with the query until then:
+	// an extension may set it while the query binds
+	query_metrics.SetMetricValue(key, std::move(new_value));
 }
 
 bool QueryProfiler::MetricIsTracked(const string &key) const {
-	if (!IsEnabled()) {
+	if (!IsEnabled() || !running) {
 		return false;
 	}
-	return metrics->MetricIsTracked(key);
+	if (metrics) {
+		return metrics->MetricIsTracked(key);
+	}
+	// before the plan is built there are no gathered metrics to ask
+	return tracked_metric_patterns && tracked_metric_patterns->MetricIsTracked(key);
 }
 
 idx_t QueryProfiler::GetBytesRead() const {
@@ -1067,6 +1103,17 @@ void QueryProfiler::GetFinalizedProfileUnderLock(
 	callback(metrics.get(), root.get());
 }
 
+unique_ptr<QueryProfileResult> QueryProfiler::CopyResult() {
+	lock_guard<std::mutex> guard(lock);
+	if (!IsEnabled() || !root) {
+		return nullptr;
+	}
+	if (!result_tree) {
+		result_tree = ToResultTree();
+	}
+	return result_tree->Copy();
+}
+
 bool QueryProfiler::HasRoot() const {
 	return root != nullptr;
 }
@@ -1133,8 +1180,7 @@ void QueryProfiler::Initialize(const PhysicalOperator &root_op) {
 		tree_map.clear();
 		root = nullptr;
 	} else {
-		auto &client_config = ClientConfig::GetConfig(context);
-		metrics = make_uniq<GatheredMetrics>(client_config.tracked_metrics);
+		metrics = make_uniq<GatheredMetrics>(GetTrackedMetrics());
 	}
 }
 
@@ -1205,6 +1251,7 @@ void QueryProfiler::FinalizeMetricsInternal() {
 	if (query_metrics.latency_timer) {
 		query_metrics.latency_timer->EndTimer();
 	}
+	query_metrics.FinalizeMetricValues(*metrics);
 	if (root) {
 		// collapse secure views first - the query-wide totals are sums over the operator tree, so leaving the
 		// operators of the view in would expose how much of the table behind it was scanned. The time of the view

@@ -17,6 +17,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_storage.hpp"
 #include "duckdb/main/secret/default_secrets.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/parser/parsed_data/create_secret_info.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/planner/operator/logical_create_secret.hpp"
@@ -158,6 +159,7 @@ void SecretManager::RegisterSecretFunction(CreateSecretFunction function, OnCrea
 unique_ptr<SecretEntry> SecretManager::RegisterSecret(CatalogTransaction transaction,
                                                       unique_ptr<const BaseSecret> secret, OnCreateConflict on_conflict,
                                                       SecretPersistType persist_type, const string &storage) {
+	CheckConfigurationLock("create");
 	InitializeSecrets(transaction);
 	return RegisterSecretInternal(transaction, std::move(secret), on_conflict, persist_type, Identifier(storage));
 }
@@ -256,6 +258,9 @@ optional_ptr<CreateSecretFunction> SecretManager::LookupFunctionInternal(const I
 }
 
 unique_ptr<SecretEntry> SecretManager::CreateSecret(ClientContext &context, const CreateSecretInput &input) {
+	// Note that this happens before looking up the secret function - creating a secret can have side effects
+	// (e.g. fetching a token over HTTP), which must not happen when secrets are locked
+	CheckConfigurationLock("create");
 	// Note that a context is required for CreateSecret, as the CreateSecretFunction expects one
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 	InitializeSecrets(transaction);
@@ -287,6 +292,7 @@ unique_ptr<SecretEntry> SecretManager::CreateSecret(ClientContext &context, cons
 }
 
 BoundStatement SecretManager::BindCreateSecret(CatalogTransaction transaction, CreateSecretInput &info) {
+	CheckConfigurationLock("create");
 	if (info.persist_type == SecretPersistType::TRANSACTION || info.storage_type == TRANSACTION_STORAGE_NAME) {
 		throw BinderException("Transaction-scoped secrets cannot be created through SQL");
 	}
@@ -417,6 +423,7 @@ unique_ptr<SecretEntry> SecretManager::GetSecretByName(CatalogTransaction transa
 void SecretManager::DropSecretByName(CatalogTransaction transaction, const Identifier &name,
                                      OnEntryNotFound on_entry_not_found, SecretPersistType persist_type,
                                      const Identifier &storage) {
+	CheckConfigurationLock("drop");
 	InitializeSecrets(transaction);
 	auto transaction_storage = GetTransactionSecretStorage(transaction);
 	if (storage == TRANSACTION_STORAGE_NAME || persist_type == SecretPersistType::TRANSACTION) {
@@ -585,6 +592,15 @@ vector<CreateSecretFunction> SecretManager::AllSecretFunctions() {
 	return result;
 }
 
+void SecretManager::CheckConfigurationLock(const string &operation) {
+	if (!db) {
+		return;
+	}
+	if (Settings::Get<LockConfigurationSetting>(*db)) {
+		throw PermissionException("Cannot %s secrets - the configuration has been locked", operation);
+	}
+}
+
 void SecretManager::ThrowOnSettingChangeIfInitialized() {
 	if (initialized) {
 		throw InvalidInputException(
@@ -643,18 +659,19 @@ void SecretManager::InitializeSecrets(CatalogTransaction transaction) {
 			return;
 		}
 
+		// load the persistent storage first if enabled: it can throw (e.g. a permission error), in which case no
+		// storage is registered yet and the next secret statement retries and throws the same error
+		if (config.allow_persistent_secrets) {
+			LoadSecretStorageInternal(
+			    make_uniq<LocalFileSecretStorage>(*this, *transaction.db, LOCAL_FILE_STORAGE_NAME, config.secret_path));
+		}
+
 		// load the tmp storage
 		LoadSecretStorageInternal(make_uniq<TemporarySecretStorage>(TEMPORARY_STORAGE_NAME, *transaction.db));
 
 		// load the connection-scoped storage: secrets created `IN connection_storage` are visible only to the
 		// connection that created them, and are dropped automatically when that connection closes.
 		LoadSecretStorageInternal(make_uniq<ConnectionSecretStorage>(CONNECTION_STORAGE_NAME));
-
-		if (config.allow_persistent_secrets) {
-			// load the persistent storage if enabled
-			LoadSecretStorageInternal(
-			    make_uniq<LocalFileSecretStorage>(*this, *transaction.db, LOCAL_FILE_STORAGE_NAME, config.secret_path));
-		}
 
 		initialized = true;
 	}
@@ -757,8 +774,10 @@ vector<reference<SecretStorage>> SecretManager::GetSecretStorages() {
 }
 
 DefaultSecretGenerator::DefaultSecretGenerator(Catalog &catalog, SecretManager &secret_manager,
-                                               identifier_set_t &persistent_secrets)
-    : DefaultGenerator(catalog), secret_manager(secret_manager), persistent_secrets(persistent_secrets) {
+                                               identifier_set_t &persistent_secrets,
+                                               shared_ptr<PersistentSecretFiles> files_p)
+    : DefaultGenerator(catalog), secret_manager(secret_manager), persistent_secrets(persistent_secrets),
+      files(std::move(files_p)) {
 }
 
 unique_ptr<CatalogEntry> DefaultSecretGenerator::CreateDefaultEntryInternal(const Identifier &entry_name) {
@@ -770,8 +789,11 @@ unique_ptr<CatalogEntry> DefaultSecretGenerator::CreateDefaultEntryInternal(cons
 
 	auto &fs = FileSystem::GetLocal(catalog.GetDatabase());
 
-	string base_secret_path = secret_manager.PersistentSecretPath();
-	string secret_path = fs.JoinPath(base_secret_path, entry_name + ".duckdb_secret");
+	// the file that was found for this secret, as the file name does not always identify the secret
+	string secret_path = files->Get(entry_name);
+	if (secret_path.empty()) {
+		return nullptr;
+	}
 
 	// Note each file should contain 1 secret
 	try {
@@ -797,6 +819,7 @@ unique_ptr<CatalogEntry> DefaultSecretGenerator::CreateDefaultEntryInternal(cons
 			// Finally: we remove the default entry from the persistent_secrets, otherwise we aren't able to drop it
 			// later
 			persistent_secrets.erase(secret_lu);
+			files->Set(entry->secret->secret->GetName(), secret_path);
 
 			return std::move(entry);
 		}

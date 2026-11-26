@@ -5,6 +5,7 @@
 #include "sqllogic_test_runner.hpp"
 #include "test_helpers.hpp"
 #include "test_config.hpp"
+#include "test_reporter.hpp"
 
 #include <functional>
 #include <iostream>
@@ -176,7 +177,7 @@ static void RunSQLLogicTest(const string &name, optional_ptr<std::istream> input
 			// here first so a cleanup failure still yields one — preserving the one-begin/one-end
 			// invariant that --emit-test-events consumers rely on.
 			runner.EmitEnd(name, "error", cleanup_failure);
-			FAIL(cleanup_failure);
+			TEST_FAIL_LINE(name, 0, cleanup_failure);
 		}
 	}
 
@@ -197,7 +198,7 @@ static void RunSQLLogicTest(const string &name, optional_ptr<std::istream> input
 		runner.EmitEnd(name, "ok", "");
 	}
 	if (error.HasError()) {
-		FAIL(error.Message());
+		TEST_FAIL_LINE(name, 0, error.Message());
 	}
 }
 
@@ -272,6 +273,8 @@ static const vector<string> &SQLiteLogicTestExcludes() {
 	    "test/random/expr/slt_good_80.test", "test/random/expr/slt_good_75.test", "test/random/expr/slt_good_42.test",
 	    "test/random/expr/slt_good_49.test", "test/random/expr/slt_good_24.test", "test/random/expr/slt_good_30.test",
 	    "test/random/expr/slt_good_8.test", "test/random/expr/slt_good_61.test",
+	    // comparing a BLOB with an INTEGER requires an explicit cast
+	    "evidence/in1.test",
 	    // dependencies between tables/views prevent dropping in DuckDB without CASCADE
 	    "test/index/view/1000/slt_good_0.test", "test/index/view/100/slt_good_0.test",
 	    "test/index/view/100/slt_good_5.test", "test/index/view/100/slt_good_1.test",
