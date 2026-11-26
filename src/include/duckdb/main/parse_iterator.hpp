@@ -86,6 +86,8 @@ private:
 	unique_ptr<TokenIterator> token_iterator;
 	//! The grammar `token_iterator`'s tokens were last matched with; kept alive so its address is not reused.
 	shared_ptr<CompiledGrammar> matched_grammar;
+	//! Byte offset in `sql` where the next statement's text starts: just past the previous one.
+	idx_t next_statement_offset = 0;
 	//! Single-statement buffer holding the result of the most recent Peek. Cleared by
 	//! GetStatement.
 	unique_ptr<SQLStatement> current_statement;

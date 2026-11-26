@@ -554,8 +554,8 @@ static ColumnMapResult MapColumnStruct(ClientContext &context, const MultiFileCo
 	ColumnMapResult result;
 	result.local_column = local_column;
 
-	if (!column_mapping.empty()) {
-		// we have column mappings at this level - construct the struct
+	if (!column_mapping.empty() || !is_root) {
+		// A nested source still supplies validity when every selected child comes from a default.
 		result.column_map = Value::STRUCT(std::move(column_mapping));
 		if (!is_root) {
 			// if this is nested we need to refer to the current column at this level
@@ -680,10 +680,51 @@ enum class PushdownExtractMapping {
 	PUSHDOWN,
 	//! the file lacks a field on the path whose default is NULL, so the extracted field is NULL in every row
 	NULL_VALUE,
-	//! the file lacks the column, or a field on the path whose default is not NULL but is NULL where the parent struct
-	//! is NULL, so the whole column has to be read
+	//! the whole column must be mapped before the field can be extracted
 	WHOLE_COLUMN
 };
+
+//! Map a pushed-down extract of a struct whose fields are not defined by the global schema, matching the fields by
+//! name, as a cast of the whole column does
+static PushdownExtractMapping GetPushdownExtractMappingByName(const LogicalType &global_type,
+                                                              const LogicalType &local_type,
+                                                              const ColumnIndex &global_index) {
+	if (local_type.id() == LogicalTypeId::SQLNULL) {
+		return PushdownExtractMapping::NULL_VALUE;
+	}
+	if (!global_index.IsPushdownExtract()) {
+		// preserve the schema conversion before a pushed cast
+		if (global_type != local_type && global_type != global_index.GetScanType()) {
+			return PushdownExtractMapping::WHOLE_COLUMN;
+		}
+		return PushdownExtractMapping::PUSHDOWN;
+	}
+	if (global_type.id() != local_type.id()) {
+		return PushdownExtractMapping::WHOLE_COLUMN;
+	}
+	if (global_type.id() != LogicalTypeId::STRUCT) {
+		return PushdownExtractMapping::PUSHDOWN;
+	}
+	auto &child_index = global_index.GetChildIndex(0);
+	auto &global_children = StructType::GetChildTypes(global_type);
+	if (child_index.GetPrimaryIndex() >= global_children.size()) {
+		return PushdownExtractMapping::PUSHDOWN;
+	}
+	auto &field = global_children[child_index.GetPrimaryIndex()];
+	auto &local_children = StructType::GetChildTypes(local_type);
+	for (idx_t local_idx = 0; local_idx < local_children.size(); local_idx++) {
+		if (!(local_children[local_idx].first == field.first)) {
+			continue;
+		}
+		if (local_idx != child_index.GetPrimaryIndex()) {
+			// the field is at another position in this file
+			return PushdownExtractMapping::WHOLE_COLUMN;
+		}
+		return GetPushdownExtractMappingByName(field.second, local_children[local_idx].second, child_index);
+	}
+	// the file lacks the field, which a cast of the whole column fills with NULL
+	return PushdownExtractMapping::NULL_VALUE;
+}
 
 static PushdownExtractMapping GetPushdownExtractMapping(ClientContext &context,
                                                         const MultiFileColumnDefinition &global_column,
@@ -703,9 +744,25 @@ static PushdownExtractMapping GetPushdownExtractMapping(ClientContext &context,
 		return PushdownExtractMapping::WHOLE_COLUMN;
 	}
 	auto &local_column = local_columns[local_idx];
-	if (!global_index.IsPushdownExtract() || global_column.type.id() != LogicalTypeId::STRUCT ||
-	    local_column.type.id() != LogicalTypeId::STRUCT) {
+	if (local_column.type.id() == LogicalTypeId::SQLNULL) {
+		// an explicitly NULL field is NULL whatever is extracted from it
+		return PushdownExtractMapping::NULL_VALUE;
+	}
+	if (!global_index.IsPushdownExtract()) {
+		if (global_column.children.empty() && global_column.type != local_column.type &&
+		    global_column.type != global_index.GetScanType()) {
+			return PushdownExtractMapping::WHOLE_COLUMN;
+		}
 		return PushdownExtractMapping::PUSHDOWN;
+	}
+	if (global_column.type.id() != local_column.type.id()) {
+		return PushdownExtractMapping::WHOLE_COLUMN;
+	}
+	if (global_column.type.id() != LogicalTypeId::STRUCT) {
+		return PushdownExtractMapping::PUSHDOWN;
+	}
+	if (global_column.children.empty()) {
+		return GetPushdownExtractMappingByName(global_column.type, local_column.type, global_index);
 	}
 	auto &child_index = global_index.GetChildIndex(0);
 	if (child_index.GetPrimaryIndex() >= global_column.children.size()) {
@@ -845,6 +902,7 @@ ResultColumnMapping MultiFileColumnMapper::CreateColumnMappingByMapper(const Col
 					auto local_index = global_id.RemapRootIndex(local_id.GetId());
 
 					reader.columns.emplace_back(virtual_entry->second.name.GetIdentifierName(), virtual_column_type);
+					reader.column_name_index.Build(reader.columns);
 					reader.column_ids.push_back(local_id);
 					reader.column_indexes.push_back(std::move(local_index));
 					reader.AddVirtualColumn(id);

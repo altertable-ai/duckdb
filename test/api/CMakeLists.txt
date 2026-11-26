@@ -23,6 +23,7 @@ set(TEST_API_OBJECTS
     test_aggregate_state_bind_data.cpp
     test_config.cpp
     test_connect_prepare.cpp
+    test_nested_schema_capability.cpp
     test_remote_pushdown_macro_arguments.cpp
     test_remote_pushdown_merge.cpp
     test_compression_select.cpp
@@ -30,8 +31,10 @@ set(TEST_API_OBJECTS
     test_connection_secrets.cpp
     test_copy_output_lifecycle.cpp
     test_custom_allocator.cpp
+    test_database_instance_partial_init.cpp
     test_extension_install_in_progress.cpp
     test_extension_repositories.cpp
+    test_extension_signature_check.cpp
     test_external_extension_provider.cpp
     test_extension_setting_autoload.cpp
     test_instance_cache.cpp
@@ -73,6 +76,7 @@ set(TEST_API_OBJECTS
     test_parse_statement_iterator.cpp
     test_dialect_extension.cpp
     test_query_node_copy.cpp
+    test_statement_tostring.cpp
     test_grammar_extension.cpp
     test_passthrough_dialect.cpp
     test_passthrough_token_matcher.cpp
@@ -81,6 +85,7 @@ set(TEST_API_OBJECTS
     test_uuid.cpp
     test_insertion_order_preserving_map.cpp
     test_bignum.cpp
+    test_persistent_secret_write_failure.cpp
     test_threads.cpp
     test_windows_header_compatibility.cpp
     test_windows_unicode_path.cpp

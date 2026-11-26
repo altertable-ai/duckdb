@@ -122,6 +122,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING(DebugForceCommitRevertFailureSetting),
     DUCKDB_SETTING(DebugForceExternalSetting),
     DUCKDB_SETTING(DebugForceFetchRowSetting),
+    DUCKDB_SETTING(DebugForceFlushAppendFailureSetting),
     DUCKDB_GLOBAL(ForceMbedtlsUnsafeSetting),
     DUCKDB_SETTING(DebugForceNoCrossProductSetting),
     DUCKDB_SETTING(ForceUpdateToDelAndInsertSetting),
@@ -195,6 +196,8 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_GLOBAL(HTTPProxySetting),
     DUCKDB_SETTING(HTTPProxyPasswordSetting),
     DUCKDB_SETTING(HTTPProxyUsernameSetting),
+    DUCKDB_SETTING(HTTPRetryQuotaThrottledSetting),
+    DUCKDB_SETTING(HTTPRetryThrottledWaitMsSetting),
     DUCKDB_SETTING(IeeeFloatingPointOpsSetting),
     DUCKDB_SETTING(IgnoreUnknownCrsSetting),
     DUCKDB_SETTING(ImmediateTransactionModeSetting),
@@ -210,6 +213,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING_CALLBACK(LogQueryPathSetting),
     DUCKDB_GLOBAL(LoggingLevel),
     DUCKDB_GLOBAL(LoggingMode),
+    DUCKDB_GLOBAL(LoggingSink),
     DUCKDB_GLOBAL(LoggingStorage),
     DUCKDB_SETTING(MaxExecutionTimeSetting),
     DUCKDB_SETTING(MaxExpressionDepthSetting),
@@ -471,15 +475,7 @@ void DBConfig::SetOption(const Identifier &name, Value value) {
 }
 
 void DBConfig::ResetOption(const ExtensionOption &extension_option) {
-	auto &default_value = extension_option.default_value;
-	auto setting_index = extension_option.setting_index.GetIndex();
-	if (!default_value.IsNull()) {
-		// Default is not NULL, override the setting
-		user_settings.SetUserSetting(setting_index, default_value);
-	} else {
-		// Otherwise just remove it from the 'set_variables' map
-		user_settings.ClearSetting(setting_index);
-	}
+	user_settings.ClearSetting(extension_option.setting_index.GetIndex());
 }
 
 void DBConfig::ResetGenericOption(idx_t setting_index) {
@@ -615,17 +611,12 @@ void DBConfig::AddExtensionOption(const Identifier &name, string description, Lo
 }
 
 void DBConfig::AddExtensionOption(const Identifier &name, ExtensionOption extension_option) {
-	auto default_value = extension_option.default_value;
 	auto setting_index = user_settings.AddExtensionOption(name, std::move(extension_option));
 	// copy over unrecognized options, if they match the new extension option
 	auto iter = options.unrecognized_options.find(name);
 	if (iter != options.unrecognized_options.end()) {
 		user_settings.SetUserSetting(setting_index, iter->second);
 		options.unrecognized_options.erase(iter);
-	}
-	if (!default_value.IsNull() && !user_settings.IsSet(setting_index)) {
-		// Default value is set, insert it into the 'set_variables' list
-		user_settings.SetUserSetting(setting_index, default_value);
 	}
 }
 
@@ -700,10 +691,11 @@ void DBConfig::CheckLock(const Identifier &name) {
 		// we are always allowed to change these settings
 		return;
 	}
-	if (!options.allowed_configs.empty()) {
+	auto allowed_configs = GetAllowedConfigs();
+	if (!allowed_configs.empty()) {
 		auto option = GetOptionByName(name);
 		auto canonical_name = option ? Identifier(option->name) : name;
-		if (options.allowed_configs.find(canonical_name) != options.allowed_configs.end()) {
+		if (allowed_configs.find(canonical_name) != allowed_configs.end()) {
 			// settings that are allowed through allowed_configs
 			return;
 		}
@@ -881,6 +873,19 @@ SettingLookupResult DBConfig::TryGetDefaultValue(optional_ptr<const Configuratio
 	return SettingLookupResult(SettingScope::GLOBAL);
 }
 
+SettingLookupResult DBConfig::TryGetDefaultValue(const Identifier &key, optional_ptr<const ConfigurationOption> option,
+                                                 Value &result) const {
+	if (option) {
+		return TryGetDefaultValue(option, result);
+	}
+	ExtensionOption extension_option;
+	if (!TryGetExtensionOption(key, extension_option) || extension_option.default_value.IsNull()) {
+		return SettingLookupResult();
+	}
+	result = extension_option.default_value;
+	return SettingLookupResult(SettingScope::GLOBAL);
+}
+
 SettingLookupResult DBConfig::TryGetCurrentSetting(const Identifier &key, Value &result) const {
 	optional_ptr<const ConfigurationOption> option;
 	auto setting_index = TryGetSettingIndex(key, option);
@@ -890,7 +895,7 @@ SettingLookupResult DBConfig::TryGetCurrentSetting(const Identifier &key, Value 
 			return lookup_result;
 		}
 	}
-	return TryGetDefaultValue(option, result);
+	return TryGetDefaultValue(key, option, result);
 }
 
 optional_idx DBConfig::TryGetSettingIndex(const Identifier &name,
@@ -1014,6 +1019,16 @@ bool DBConfig::IsOptimizerDisabled(OptimizerType type) const {
 	return options.disabled_optimizers.find(type) != options.disabled_optimizers.end();
 }
 
+LogicalType DBConfig::GetForceVariantShredding() const {
+	std::lock_guard<std::recursive_mutex> guard(config_lock);
+	return options.force_variant_shredding;
+}
+
+identifier_set_t DBConfig::GetAllowedConfigs() const {
+	std::lock_guard<std::recursive_mutex> guard(config_lock);
+	return options.allowed_configs;
+}
+
 set<OptimizerType> DBConfig::GetDisabledOptimizers() const {
 	lock_guard<mutex> guard(disabled_optimizers_lock);
 	return options.disabled_optimizers;
@@ -1082,10 +1097,46 @@ vector<string> DBConfig::GetAllowedPaths() const {
 	return vector<string>(options.allowed_paths.begin(), options.allowed_paths.end());
 }
 
+static bool HasRemotePathTraversal(const string &path) {
+	auto scheme_end = path.find("://");
+	if (scheme_end == string::npos || Path::FromString(path).IsLocal()) {
+		return false;
+	}
+
+	auto path_to_check = StringUtil::Lower(path);
+	if (StringUtil::StartsWith(path_to_check, "http://") || StringUtil::StartsWith(path_to_check, "https://")) {
+		// HTTP queries and fragments are not part of the path.
+		path_to_check = path_to_check.substr(0, path_to_check.find_first_of("?#"));
+	}
+	auto path_start = path_to_check.find_first_of("/\\", scheme_end + 3);
+	if (path_start == string::npos) {
+		return false;
+	}
+
+	// Replace all separator variants with a literal /
+	path_to_check = path_to_check.substr(path_start);
+	path_to_check = StringUtil::Replace(path_to_check, "\\", "/");
+	path_to_check = StringUtil::Replace(path_to_check, "%2f", "/");
+	path_to_check = StringUtil::Replace(path_to_check, "%5c", "/");
+	// Ensure encoded dots are also treated as a .
+	path_to_check = StringUtil::Replace(path_to_check, "%2e", ".");
+
+	for (const auto &segment : StringUtil::Split(path_to_check, '/')) {
+		if (segment == "..") {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool DBConfig::CanAccessFile(const string &input_path, FileType type, optional_ptr<FileOpener> opener) {
 	if (Settings::Get<EnableExternalAccessSetting>(*this)) {
 		// all external access is allowed
 		return true;
+	}
+	// Remote backends can resolve parent segments outside the allowed prefix.
+	if (HasRemotePathTraversal(input_path)) {
+		return false;
 	}
 	string path = SanitizeAllowedPath(input_path, opener);
 

@@ -165,7 +165,7 @@ static unique_ptr<BaseStatistics> PropagateAbsStats(ClientContext &context, Func
 			}
 
 			double min_val, max_val;
-			if (current_min == 0 || current_max == 0) {
+			if (current_min == 0) {
 				// Unlike integers, floating point abs cannot be removed for zero: abs(-0.0) clears the sign bit.
 				min_val = AbsOperator::Operation<double, double>(current_min);
 				max_val = AbsOperator::Operation<double, double>(current_max);
@@ -813,9 +813,8 @@ struct TruncDecimalNegativePrecisionOperator {
 		auto source_scale = DecimalType::GetScale(func_expr.GetChildren()[0]->GetReturnType());
 		auto width = DecimalType::GetWidth(func_expr.GetChildren()[0]->GetReturnType());
 		if (info.target_scale <= -int32_t(width - source_scale)) {
-			// scale too big for width
-			result.SetVectorType(VectorType::CONSTANT_VECTOR);
-			result.SetValue(0, Value::INTEGER(0));
+			// scale too big for width: every value truncates to zero, NULL stays NULL
+			UnaryExecutor::Execute<T, T>(input.data[0], result, [](T) { return T(0); });
 			return;
 		}
 		T divide_power_of_ten =
@@ -977,10 +976,8 @@ inline T RoundDivide(T input, T power_of_ten) {
 struct RoundHalfAwayFromZero {
 	static constexpr const char *Name = "ROUND";
 
-	// std::round is wrong for the largest double below 0.5 on some platforms (MinGW rounds it up to 1)
 	static double Nearest(double value) {
-		double truncated = std::trunc(value);
-		return std::fabs(value - truncated) >= 0.5 ? truncated + std::copysign(1.0, value) : truncated;
+		return RoundToNearestAwayFromZero(value);
 	}
 	template <class T>
 	static bool RoundsAway(T) {
@@ -1055,7 +1052,7 @@ struct RoundOperatorPrecision {
 struct RoundOperator {
 	template <class TA, class TR>
 	static inline TR Operation(TA input) {
-		double rounded_value = RoundHalfAwayFromZero::Nearest(input);
+		double rounded_value = RoundToNearestAwayFromZero(static_cast<double>(input));
 		if (std::isinf(rounded_value) || std::isnan(rounded_value)) {
 			return input;
 		}
@@ -1137,9 +1134,8 @@ struct DecimalRoundNegativePrecisionOperator {
 		auto &info = func_expr.BindInfo()->Cast<RoundPrecisionFunctionData>();
 		auto source_scale = DecimalType::GetScale(func_expr.GetChildren()[0]->GetReturnType());
 		if (info.target_scale < -int32_t(info.source_width - source_scale)) {
-			// scale too big for width
-			result.SetVectorType(VectorType::CONSTANT_VECTOR);
-			result.SetValue(0, Value::INTEGER(0));
+			// scale too big for width: every value rounds to zero, NULL stays NULL
+			UnaryExecutor::Execute<T, T>(input.data[0], result, [](T) { return T(0); });
 			return;
 		}
 		T divide_power_of_ten =

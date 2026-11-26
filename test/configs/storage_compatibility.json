@@ -108,7 +108,8 @@
         "test/parquet/timens_parquet.test",
         "test/sql/types/time/test_time_ns.test",
         "test/sql/copy/parquet/int96_as.test",
-        "test/sql/function/timestamp/test_icu_time_bucket_timestamptz_ns.test"
+        "test/sql/function/timestamp/test_icu_time_bucket_timestamptz_ns.test",
+        "test/sql/types/timestamp/timestamptz_ns_timestamptz_comparison.test"
       ]
     },
     {
@@ -248,6 +249,12 @@
       ]
     },
     {
+      "reason": "Checkpoint vacuum of indexed tables requires storage version v2.0.0.",
+      "paths": [
+        "test/sql/storage/checkpoint_vacuum_unbound_index.test"
+      ]
+    },
+    {
       "reason": "Triggers are a new catalog type not present in old storage files.",
       "paths": [
         "test/sql/trigger/create_trigger_catalog.test",
@@ -281,6 +288,12 @@
         "test/sql/types/list/list_extract_types.test_slow",
         "test/sql/types/test_all_types.test_slow",
         "test/sql/window/test_streaming_lead_lag.test_slow"
+      ]
+    },
+    {
+      "reason": "The synchronous task batch does not always reach the scheduler log: timing-dependent assertion (flaky under this config).",
+      "paths": [
+        "test/sql/parallelism/async_task_synchronous_batch.test"
       ]
     }
   ]
